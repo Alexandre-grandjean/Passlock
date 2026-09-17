@@ -111,7 +111,7 @@ phases fait autorité dans [`ROADMAP.md`](ROADMAP.md).
 | T29 | Corruption du magasin | Élevé (disponibilité) | Faible | **il n'y a plus de base de données** : SQLite a été abandonné en phase 2 (ADR-020). Le décodage d'archive est **borné et vérifié** ; l'écriture du conteneur est atomique | une corruption du contenu reste un défaut du programme, pas un scénario exploitable ; une corruption du **fichier** est détectée par le tag AEAD. *Cette ligne décrivait une base SQLite : elle était devenue fausse* | **F2** |
 | T30 | Compromission physique du périphérique | Critique | Faible | chiffrement au repos, verrouillage automatique | DMA, cold boot, puce espionne : hors périmètre | — |
 | T31 | Perte totale de l'appareil | Élevé (disponibilité) | Moyenne | sauvegarde + **test de restauration** + clé de récupération | sans sauvegarde ni clé de récupération, la perte est **définitive** | **F4.1 partiel** — clé de récupération **livrée** ; sauvegardes et test de restauration à l'étape 3 |
-| T32 | Traversée de chemin / zip slip | Élevé | Faible | assainissement des noms, `O_EXCL`, écriture dans un répertoire créé par nous | — | **F4** |
+| T32 | Traversée de chemin / zip slip | Élevé | Faible | assainissement des noms, `O_EXCL`, écriture dans un répertoire créé par nous. **Pour les pièces jointes** : un nom d'entrée n'est **jamais** un chemin — le fichier porte un nom dérivé par HMAC d'un identifiant aléatoire, et la restauration refuse d'écraser une cible | la traversée reste possible pour un **chemin choisi par l'utilisateur** (`attach add`, `attach get --output`), qui est sa responsabilité | **F4.2** (pièces jointes ; import/export à l'étape 4) |
 
 ## 5. Scénarios d'attaque détaillés
 

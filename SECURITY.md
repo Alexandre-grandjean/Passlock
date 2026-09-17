@@ -6,7 +6,7 @@
 
 ## Statut du projet
 
-**Phases 0 à 3 terminées et approuvées. Phase 4 en cours — étape 1 sur 5 close.**
+**Phases 0 à 3 terminées et approuvées. Phase 4 en cours — étapes 1 et 2 sur 5 closes.**
 
 Ce qui existe et est testé : dérivation de clés, chiffrement authentifié, hiérarchie
 de clés, conteneur et son format, écriture atomique, verrouillage, sentinelle
@@ -15,10 +15,9 @@ historique, corbeille, recherche, migration ; générateur de mots de passe, de 
 de passe et de secrets arbitraires ; HOTP et TOTP avec analyse des URI
 `otpauth://` ; interface en ligne de commande headless.
 
-Ce qui n'existe **pas encore** : pièces jointes, sauvegardes, test de restauration,
-import/export, presse-papiers *(phase 4, étapes 2 à 5)* ; centre de sécurité et analyse
-d'URL *(phase 5)* ; interface graphique *(phase 6)* ; audit externe, SBOM, build
-reproductible *(phase 7)*.
+Ce qui n'existe **pas encore** : sauvegardes, test de restauration, import/export,
+presse-papiers *(phase 4, étapes 3 à 5)* ; centre de sécurité et analyse d'URL *(phase 5)* ;
+interface graphique *(phase 6)* ; audit externe, SBOM, build reproductible *(phase 7)*.
 
 **Le contenu, l'ordre, les dépendances et l'état des phases font autorité dans
 [`ROADMAP.md`](ROADMAP.md).** Ce document-ci ne les redéfinit pas : il énonce les
@@ -182,6 +181,8 @@ un suivi explicite.
 | L24 | **`cargo deny` ne couvre pas les données tierces embarquées** — il vérifie les licences des *crates*, pas des fichiers livrés. Les listes de mots (CC-BY 3.0) et la future liste des suffixes publics (MPL-2.0) échappent donc à la vérification automatique | une licence de donnée embarquée pourrait changer à l'insu du projet | contrôlée **manuellement** par `ATTRIBUTION.md`, avec empreinte épinglée et test d'intégrité. **MPL-2.0 n'est pas dans la liste blanche de `deny.toml`** : elle n'y entrera pas, un fichier de données n'étant pas une dépendance de crate. Précisé en §6.3 |
 | L25 | **La liste des suffixes publics vieillit**, et rien ne le corrige automatiquement (aucun réseau, par conception) | un suffixe récent peut ne pas être reconnu : le regroupement eTLD+1 est alors **incertain** et doit être présenté comme tel | ré-embarquement délibéré, commit revu, âge de la liste **affiché** par le centre de sécurité. Stratégie en `ROADMAP.md` §5.4 |
 | L26 | **Un fichier-clé est un fichier : il se copie.** Ce n'est donc pas un facteur de possession inviolable, contrairement à un jeton matériel qui ne peut pas être dupliqué | une copie du fichier clé ouvre le coffre depuis n'importe quelle machine, et rien ne permet de le détecter | dit à l'utilisateur à chaque installation, et repris dans `ROADMAP.md` §4 : le support doit être **physiquement distinct** du coffre et des sauvegardes, et présent seulement pendant l'ouverture. Un vrai facteur matériel (FIDO2 `hmac-secret`) est **repoussé et dit comme tel** — il exigerait `hidapi`/`libusb`, donc du C, et sortirait de la politique de dépendances (ADR-032) |
+| L28 | **L'intégrité d'une pièce jointe est portée par son propre AEAD, et non par l'AAD du conteneur.** Un blob vit hors du fichier de coffre, donc hors de la portée de son tag | un blob supprimé par un tiers ne casse **aucun** tag : l'absence n'est constatée que par `attach verify`, qui la signale comme une incohérence | dit explicitement dans `docs/ATTACHMENT_FORMAT.md` §5.1. Une absence est une **erreur d'intégrité**, jamais un déchet : elle n'est pas candidate au ramasse-miettes. Un blob corrompu ou absent reste **référencé**, donc préservé |
+| L29 | **Une sauvegarde du seul fichier de coffre ne préserve pas les pièces jointes.** Les blobs vivent hors du conteneur | restaurer un coffre sans son répertoire `.attachments/` donne un coffre dont les pièces jointes sont **absentes** — incohérence détectée, jamais silencieuse | dit à chaque `attach add`. Le chantier « sauvegardes » (étape 3) doit inclure le répertoire des blobs ; la vérification de restauration doit rejouer le contrôle des blobs |
 | L27 | **La durabilité de l'entrée de répertoire n'est pas revendiquée sous Windows.** `make_durable` y retourne `FileOnly` : le contenu est synchronisé, pas le nom | après une coupure d'alimentation, une pièce jointe peut manquer alors que le coffre la référence — une **promesse non tenue** | le niveau est **rendu** par la primitive (`Durability`, `#[must_use]`) et **rapporté à l'ouverture** du coffre, jamais tu. L'absence est détectée par `attach verify` (étape 2). Reprise en phase 7 avec un exécuteur Windows réel |
 
 ### 4.1 L'alerte de retour en arrière est persistante — et c'est délibéré
@@ -366,11 +367,32 @@ surfaces nouvelles sont **bornées et énumérées**, comme aux phases précéde
 | **Deux options globales d'ouverture** (`--recovery-key-stdin`, `--key-file`) | propagées à toutes les commandes | `open_store` est le **seul** point qui choisit le chemin d'ouverture : aucun chemin n'échappe aux diagnostics. **Aucun secret en argument de commande** |
 | **Clé de récupération affichée sur stdout** | un secret quitte le processus par un canal redirigeable | assumé et dit : c'est le seul moyen de la remettre à l'utilisateur. Affichée **une seule fois**, jamais journalisée, jamais recopiée sur la sortie d'erreur |
 
+### 4.9 Ce que la phase 4, étape 2, a ajouté comme surface
+
+Des blobs chiffrés **hors du conteneur**, donc hors de la portée de son tag.
+
+| Surface | Nature | Traitement |
+|---|---|---|
+| **Fichiers de blob** | fichier séparé, chiffré, dont le nom est dérivé et le contenu découpé | header à offsets fixes **sans parseur** ; `chunk_count` **recalculé** depuis la taille ; longueur totale **comparée** à la taille réelle avant toute allocation ; cible de fuzzing `parse_attachment_blob` |
+| **Morceaux** | réordonnancement, duplication, transplantation | l'**index**, l'identifiant du blob et celui du coffre entrent dans l'AAD de chaque morceau (`I-BLOB-AAD`) |
+| **Troncature propre** | l'AEAD **ne la détecte pas** | détectée par le `chunk_count` **de l'archive** et par la longueur exacte. L'AEAD seul ne suffit pas, et c'est écrit |
+| **Rejeu d'une version antérieure du même blob** | tags valides | détecté par `content_mac`, lié au coffre, au blob et à la taille |
+| **Collision de nom de blob** | HMAC tronqué à 128 bits | `O_EXCL` / `CREATE_NEW` est la garantie ultime : la création **échoue** au lieu d'écraser, et un nouvel identifiant est tiré |
+| **Ramasse-miettes** | première opération du produit qui supprime des fichiers **en dehors** du coffre | trois constats **séparés** : orphelins (supprimables), fichiers étrangers (**jamais** supprimés), absences (rien à supprimer). Le balayage rend des **noms**, et le magasin **revalide** le nom avant toute suppression |
+| **`attach get`** | écrit du clair vers un chemin choisi par l'utilisateur | temporaire créé en exclusif, **publié sans écrasement** (`publish_no_replace`), nettoyé en cas d'échec ; la destination n'existe jamais à moitié |
+| **Répertoire `.attachments/`** | conteneur de fichiers, non chiffré en tant que conteneur | les **tailles** et le **nombre** de pièces jointes sont observables par le système de fichiers (comme la taille du coffre) ; aucun nom d'origine n'y figure. Voir **L28**, **L29** |
+
 **Note de correction.** Une version antérieure de `SECURITY.md` §8 affirmait, à propos
 des slots, que « l'ajout et la révocation sont en O(1) ». **C'était faux** pour le
 fichier de coffre : le header entier entre dans l'AAD du payload, donc ajouter un slot
 **ré-écrit tout le payload** au prochain enregistrement. Le §3.2 de ce même document le
 disait correctement, et la contradiction a été corrigée dans le §8.
+
+**Note de correction (étape 2).** `model/mod.rs` documentait `content_mac` comme
+« `HMAC(K_index, contenu en clair)` ». La définition réelle lie **le coffre, le blob et la
+taille** — elle est désormais écrite dans `docs/ATTACHMENT_FORMAT.md` §6 et dans le code.
+Un commentaire qui laisse ouverte la question de ce qui est authentifié est un piège pour
+le prochain lecteur.
 
 ## 5. Journalisation
 
@@ -602,6 +624,7 @@ principal** que chaque phase introduit, et où il est traité.
 | 2 | historique conservant des secrets que l'utilisateur croit supprimés ; injection de requête *(écartée en abandonnant SQLite)* | §4.5, L22 |
 | 3 | faiblesse du générateur ; **revendication d'entropie trop généreuse** ; injection de séquences d'échappement par un libellé TOTP ; **le TOTP rangé dans le même coffre n'apporte aucune protection contre la compromission de ce coffre** ; horloge fausse indétectable | §4.6, §4.7, L16–L21, L23 |
 | 4 | **export en clair — fuite massive et délibérée** ; parseurs d'import à fuzzzer ; **presse-papiers comme canal public** ; ramasse-miettes de pièces jointes supprimant des fichiers | L22, T32, `docs/TOTP.md` §8 |
+| 4 *(étape 2, livrée)* | **une sauvegarde du seul fichier de coffre perd les pièces jointes** (L29) ; **l'AEAD ne détecte pas une troncature propre** — c'est la métadonnée qui le fait (L28) ; un **ramasse-miettes** qui se tromperait de catégorie détruirait des données | §4.9, L28, L29, `docs/ATTACHMENT_FORMAT.md`, `docs/AUDIT_PHASE4_2_PIECES_JOINTES.md` |
 | 4 *(étape 1, livrée)* | **un slot supplémentaire est un chemin d'entrée de plus** — récupérabilité et résistance au vol varient en sens inverse ; **le fichier-clé n'est pas un facteur matériel** (L26) ; **la durabilité réduite sous Windows** peut laisser une promesse non tenue après coupure (L27) ; un secret affiché sur stdout est redirigeable | §4.8, §8, L26, L27, `docs/AUDIT_PHASE4_1_RECUPERATION.md` |
 | 5 | **faux sentiment de protection** — un centre de sécurité qui rassure sans rien garantir ; regroupement de domaines par eTLD+1 erroné dans certains cas, notamment sur un suffixe absent d'une liste vieillissante (L25) ; `expires_at` est le **seul** élément de la phase qui écrit dans les entrées, et il écrit une donnée fournie par l'utilisateur | à traiter **en phase 5** ; décisions déjà tranchées en `ROADMAP.md` §5.3 et §5.4 |
 | 6 | webview ; IPC ; CSP ; **extension de la durée de vie de la clé en mémoire** par la session déverrouillée | à traiter **en phase 6**, et à documenter ici |

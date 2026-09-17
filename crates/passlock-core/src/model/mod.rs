@@ -594,6 +594,44 @@ pub struct AttachmentMeta {
     pub content_mac: [u8; 32],
 }
 
+impl AttachmentMeta {
+    /// Copie explicitement les métadonnées d'une pièce jointe.
+    ///
+    /// **NOTE DE CORRECTION.** Le commentaire de `content_mac` ci-dessus disait
+    /// « `HMAC(K_index, contenu en clair)` ». La définition exacte est plus étroite, et
+    /// elle est celle qu'implémente `attachment.rs` :
+    ///
+    /// ```text
+    /// HMAC(K_index, "passlock/v1/attachment-content-mac"
+    ///              ‖ vault_id ‖ blob_id ‖ taille ‖ clair)
+    /// ```
+    ///
+    /// La liaison au coffre, au blob et à la taille rend le MAC **non rejouable** d'un
+    /// blob, d'un coffre ou d'une taille à un autre. Ce n'est pas la correction d'une
+    /// faille démontrée — l'AAD des morceaux lie déjà ces valeurs — mais une défense en
+    /// profondeur, et surtout une valeur **auto-descriptive** là où le commentaire
+    /// initial en laissait l'interprétation ouverte.
+    ///
+    /// # Pourquoi une méthode nommée plutôt que `Clone`
+    ///
+    /// Même raison que `Entry::duplicate` : dupliquer des métadonnées doit rester un
+    /// acte **visible en relecture**. Un `#[derive(Clone)]` se serait propagé sans
+    /// qu'on le remarque ; `duplicate()` se repère.
+    #[must_use]
+    pub fn duplicate(&self) -> Self {
+        Self {
+            id: self.id,
+            entry: self.entry,
+            name: self.name.clone(),
+            size: self.size,
+            chunk_size: self.chunk_size,
+            chunk_count: self.chunk_count,
+            created_at: self.created_at,
+            content_mac: self.content_mac,
+        }
+    }
+}
+
 impl Wipe for AttachmentMeta {
     fn wipe(&mut self) {
         self.name.wipe();

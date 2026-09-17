@@ -992,3 +992,104 @@ restrictives posées à la création, `fsync` puis `fsync` du répertoire parent
 par `write_atomic` : celui-ci a une sémantique de **remplacement**, et écraser un
 fichier-clé existant détruirait le seul exemplaire d'une clé peut-être encore installée
 ailleurs.
+
+---
+
+## ADR-033 — Séparation des domaines cryptographiques : deux clés sous `K_attachments`
+
+**Statut :** accepté, **avec un renforcement par rapport à la rédaction initiale**
+
+**Problème.** Le nom de fichier d'un blob et son contenu ont besoin de deux primitives
+différentes : HMAC-SHA256 pour le premier, XChaCha20-Poly1305 pour le second. Faut-il les
+faire reposer sur la même clé, `K_attachments` ?
+
+**Menace réduite.** Une réutilisation de clé **entre deux primitives**. Aucune attaque
+pratique n'est connue contre HMAC-SHA256 et ChaCha20 employés sous la même clé — et la
+décision n'affirme pas le contraire.
+
+**Ce qui a décidé.** Le **nom de fichier d'un blob est publié** : il suffit de lire le
+répertoire `.attachments/`. Sans séparation, tout processus local obtiendrait des sorties
+HMAC **connues** sous la clé qui protège aussi la confidentialité des mêmes pièces
+jointes. Formulation exacte : cette réutilisation **n'est pas exploitée, elle est inutile**
+— et le projet refuse de reposer sur une hypothèse non prouvée quand la séparation coûte un
+appel à une fonction déjà écrite.
+
+**Décision.**
+
+```
+K_attachments  (racine de domaine, dérivée de la DEK par HKDF)
+   ├── K_blob_name = HKDF(K_attachments, "passlock/v1/blob-name")  → HMAC-SHA256
+   └── K_blob_aead = HKDF(K_attachments, "passlock/v1/blob-aead")  → XChaCha20-Poly1305
+```
+
+**Renforcement : la racine n'est pas conservée.** La rédaction initiale prévoyait un champ
+**privé** dans `SubKeys`. L'écriture du code a montré qu'un champ privé jamais lu n'avait
+**aucune raison d'exister** : `K_attachments` est dérivée, employée pour produire les deux
+clés de travail, puis **détruite immédiatement**. Il n'existe donc aucun moyen d'employer la
+racine comme clé — la règle est structurelle, pas conventionnelle.
+
+**Ce qui n'est PAS scindé, et pourquoi.** `K_index` sert trois usages — `sentinel-name`,
+`sentinel-mac`, `attachment-content-mac` — tous de la **même** primitive. La séparation y
+est déjà assurée par une **étiquette versionnée en préfixe du message**, mécanisme employé
+depuis la phase 1. Lui ajouter une clé dédiée tout en laissant la sentinelle employer
+`K_index` brute donnerait **deux mécanismes pour le même problème** — moins cohérent, pas
+plus sûr.
+
+**Règle qui en découle — `I-KEYDOMAIN`.** Une clé n'est jamais employée par deux
+primitives. À primitive unique et usages multiples, l'étiquette va **en préfixe du
+message**. L'étiquette figure **soit** dans l'`info` du HKDF, **soit** en préfixe du
+message — **jamais les deux**. Et une racine de domaine n'est jamais une clé de travail.
+
+**Ce qui garantit que la règle tient.** Un test vérifie qu'aucune étiquette n'est le
+préfixe d'une autre — deux étiquettes emboîtées sont une invitation à ce qu'une extension
+future les confonde — et que les deux clés de travail diffèrent de la racine et de toutes
+les autres sous-clés.
+
+**Aucun changement de format.** Aucune de ces clés n'est persistée : elles sont dérivées à
+chaque déverrouillage.
+
+---
+
+## ADR-034 — Pièces jointes : blobs hors du conteneur, et ce que cela coûte
+
+**Statut :** accepté, **avec deux limites nommées**
+
+**Problème.** Où loger un fichier de 500 Mio, alors que le conteneur est chiffré en un seul
+bloc AEAD ?
+
+**Menace réduite.** T7 et T29 (disponibilité) : la réécriture intégrale du coffre à chaque
+changement de titre disparaît.
+
+**Décision.** Chaque pièce jointe est un **fichier de blob** séparé, dans
+`<coffre>.attachments/`, chiffré par morceaux de 1 Mio sous `K_blob_aead`, et nommé par un
+HMAC dérivé. Le conteneur ne porte que ses métadonnées — section qui **existait depuis la
+phase 2**, bornée et vide. **Aucun changement de format.**
+
+**Ce que cela coûte, et qui est écrit plutôt que découvert.**
+
+1. **L'intégrité d'un blob n'est plus portée par le tag du conteneur** (limite **L28**).
+   Un blob supprimé par un tiers ne casse aucun tag : l'absence n'est constatée que par
+   `attach verify`.
+2. **Une sauvegarde du seul fichier de coffre perd les pièces jointes** (limite **L29**).
+   Dit à chaque `attach add`, et le chantier « sauvegardes » devra inclure le répertoire.
+
+**L'index du morceau est dans l'AAD, et ce n'est pas une precaution de style.** Sans lui,
+le nonce voyageant avec son chiffré, deux enregistrements de même taille seraient
+interchangeables : le déchiffrement réussirait et le clair serait **réordonné**. Une
+première rédaction de ce format omettait l'index tout en affirmant que réordonner
+invalidait le tag. **C'était faux**, et c'est la construction qui a été corrigée.
+
+**Ce que l'AEAD ne détecte pas, et qui le détecte.** Une troncature **propre** — des
+morceaux de queue retirés — se déchiffre morceau par morceau sans qu'aucun tag n'échoue.
+Ce sont le `chunk_count` **de l'archive** et la longueur exacte qui la détectent. Le rejeu
+d'une version antérieure du même blob est, lui, écarté par `content_mac`.
+
+**Ramasse-miettes.** `attach gc` distingue **trois** constats — orphelins, fichiers
+étrangers, absences — parce qu'ils n'appellent pas la même décision. **Un blob référencé
+mais corrompu n'est ni orphelin ni absent : il est présent**, donc jamais candidat à la
+suppression. Sans cette propriété, une corruption se transformerait en perte de données par
+l'effet d'un outil de maintenance.
+
+**Collision de nom.** Le nom est tronqué à 128 bits : une collision est improbable, jamais
+impossible. `O_EXCL` / `CREATE_NEW` est la garantie ultime — la création **échoue** au lieu
+d'écraser, et un nouvel identifiant est tiré.

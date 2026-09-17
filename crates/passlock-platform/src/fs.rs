@@ -270,6 +270,30 @@ pub use crate::backend::path_exists;
 /// « le système a refusé ».
 pub use crate::backend::make_durable;
 
+/// Publie un fichier temporaire sous son nom définitif, **sans écraser**.
+///
+/// # Pourquoi cette primitive existe
+///
+/// Un renommage classique **remplace** la cible. Ici l'écrasement doit être impossible :
+/// la cible est choisie par l'utilisateur, et le fichier qui s'y trouve déjà ne nous
+/// appartient pas.
+///
+/// Elle sert à un motif précis : écrire une donnée en clair dans un **temporaire**, et
+/// ne la publier qu'une fois qu'elle est complète et vérifiée. Une interruption laisse
+/// alors un temporaire — jamais un fichier tronqué qui ressemblerait à un résultat.
+///
+/// * **Unix** : `linkat` puis `unlinkat`. Le lien refuse une cible existante, et sa pose
+///   est **atomique**.
+/// * **Windows** : `MoveFileExW` sans `MOVEFILE_REPLACE_EXISTING`, donc sans écrasement.
+///   **NON VÉRIFIÉ À L'EXÉCUTION.**
+///
+/// Les deux chemins doivent désigner le **même répertoire** (Unix) ; c'est aussi la
+/// condition d'un déplacement bon marché sur Windows.
+///
+/// # Erreurs
+/// `io::ErrorKind::AlreadyExists` si la cible existe déjà.
+pub use crate::backend::publish_no_replace;
+
 /// Niveau de durabilité que **cette plateforme** peut atteindre.
 ///
 /// Sert à **rapporter** la garantie au moment de l'ouverture d'un coffre, sans avoir

@@ -34,7 +34,7 @@ Un seul document définit le contenu d'une phase : celui-ci. Les autres s'y réf
 | **1** | Moteur cryptographique et conteneur | **Terminée et gelée** |
 | **2** | Modèle de données et cœur de stockage | **Terminée et gelée** |
 | **3** | Générateur de secrets et TOTP | **Terminée et approuvée** |
-| **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **En cours** — étape 1 sur 5 close |
+| **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **En cours** — étapes 1 et 2 sur 5 closes |
 | **5** | Centre de sécurité et analyse d'URL | **Non commencée** |
 | **6** | Interface graphique | **Non commencée** |
 | **7** | Durcissement, audit et livrables de release | **Non commencée** |
@@ -263,8 +263,15 @@ le presse-papiers, ou vers un blob séparé.
   même chemin de code, slots supplémentaires (installation, remplacement, révocation),
   et le socle transverse de création exclusive et de durabilité des fichiers sensibles.
   **Aucun changement de format** : le rôle de slot 2 était réservé depuis la phase 1.
-- **Restent : étapes 2 à 5** — pièces jointes, sauvegardes et test de restauration,
-  import/export, presse-papiers.
+- **Étape 2 — pièces jointes : close et auditée**
+  (`docs/AUDIT_PHASE4_2_PIECES_JOINTES.md`). Livrés : blobs chiffrés séparés du conteneur
+  (`docs/ATTACHMENT_FORMAT.md`), domaines de clés séparés — `K_blob_name` pour le nom,
+  `K_blob_aead` pour le contenu, la racine `K_attachments` étant **détruite** après
+  usage —, commandes `attach add|list|get|verify|rm|gc`, et un ramasse-miettes qui
+  distingue orphelins, fichiers étrangers et absences. **Aucun changement de format de
+  coffre** : la section des pièces jointes existait depuis la phase 2.
+- **Restent : étapes 3 à 5** — sauvegardes et test de restauration, import/export,
+  presse-papiers.
 - C'est la **plus large** des phases restantes : cinq chantiers indépendants.
 
 ---

@@ -25,6 +25,7 @@
 //!   (`ps`) et dans l'historique du shell. **Aucune option de ce type n'existe**,
 //!   et il ne faut pas en ajouter.
 
+mod attachment;
 mod generate;
 mod recovery;
 mod totp;
@@ -230,6 +231,7 @@ fn run(hardening: passlock_platform::process::ProcessHardening) -> CliResult {
         Some(("entry", sub)) => cmd_entry(sub, &options, &config),
         Some(("search", sub)) => cmd_search(sub, &options, &config),
         Some(("history", sub)) => cmd_history(sub, &options, &config),
+        Some(("attach", sub)) => attachment::cmd_attachment(sub, &options, &config),
         Some(("recovery", sub)) => recovery::cmd_recovery(sub, &options, &config),
         Some(("keyfile", sub)) => recovery::cmd_keyfile(sub, &options, &config),
         Some(("generate", sub)) => generate::cmd_generate(sub),
@@ -619,6 +621,7 @@ fn build_command() -> Command {
                         .help("Supprime définitivement l'historique de cette entrée"),
                 ),
         )
+        .subcommand(attachment::command())
         .subcommand(recovery::recovery_command())
         .subcommand(recovery::keyfile_command())
         .subcommand(generate::generate_command())
@@ -917,7 +920,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 ///
 /// Il n'est **pas** utilisé pour une décision de sécurité : seul l'affichage
 /// l'emploie.
-fn format_timestamp(seconds: u64) -> String {
+pub(crate) fn format_timestamp(seconds: u64) -> String {
     const SECONDS_PER_DAY: u64 = 86_400;
     const DAYS_PER_ERA: u64 = 146_097; // 400 ans
     const DAYS_PER_YEAR: u64 = 365;

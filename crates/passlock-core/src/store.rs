@@ -33,15 +33,43 @@
 
 use zeroize::Zeroizing;
 
+use std::path::{Path, PathBuf};
+
+use passlock_platform::fs::{self, Durability};
+
 use crate::archive;
+use crate::attachment;
 use crate::error::{Error, Result};
 use crate::migrate;
 use crate::model::{
-    Archive, AuditEvent, AuditKind, Entry, EntryId, Folder, FolderId, MAX_AUDIT_EVENTS,
-    MAX_FOLDER_DEPTH, MAX_NAME_LEN, Revision, Tag, TagId,
+    Archive, AttachmentMeta, AuditEvent, AuditKind, BlobId, Entry, EntryId, Folder, FolderId,
+    MAX_ATTACHMENT_NAME_LEN, MAX_ATTACHMENTS, MAX_AUDIT_EVENTS, MAX_FOLDER_DEPTH, MAX_NAME_LEN,
+    Revision, Tag, TagId,
 };
 use crate::rollback::now_unix;
 use crate::vault::{Credentials, Diagnostics, Vault, VaultConfig};
+
+/// Nombre de tirages d'un nom de blob avant d'abandonner.
+///
+/// Le nom est un HMAC tronqué à 128 bits : au-delà de quelques tirages, une collision
+/// répétée ne relève plus du hasard mais d'un adversaire qui occupe les noms, ou d'un
+/// défaut. On s'arrête alors avec une erreur franche plutôt que de boucler.
+const MAX_BLOB_NAME_ATTEMPTS: u32 = 8;
+
+/// Vérifie que le niveau de durabilité **obtenu** est celui que la plateforme déclare.
+///
+/// `platform_durability` est ce qui est **rapporté à l'utilisateur** à l'ouverture ;
+/// `make_durable` rend ce qui a été **réellement obtenu**. S'ils divergent, le rapport
+/// mentirait : c'est un défaut du programme, jamais une condition d'exploitation.
+fn check_durability(level: Durability) -> Result<()> {
+    if level == fs::platform_durability() {
+        Ok(())
+    } else {
+        Err(Error::Internal {
+            invariant: "le niveau de durabilité obtenu diffère de celui déclaré par la plateforme",
+        })
+    }
+}
 
 /// Un coffre ouvert, avec son modèle de données.
 pub struct VaultStore {
@@ -55,7 +83,7 @@ impl VaultStore {
     ///
     /// # Erreurs
     /// Voir [`Vault::create`].
-    pub fn create(path: &std::path::Path, password: &[u8], config: &VaultConfig) -> Result<Self> {
+    pub fn create(path: &Path, password: &[u8], config: &VaultConfig) -> Result<Self> {
         let vault = Vault::create(path, password, config)?;
         let mut store = Self {
             vault,
@@ -82,7 +110,7 @@ impl VaultStore {
     ///
     /// # Erreurs
     /// Voir [`VaultStore::open_with`].
-    pub fn open(path: &std::path::Path, password: &[u8], config: &VaultConfig) -> Result<Self> {
+    pub fn open(path: &Path, password: &[u8], config: &VaultConfig) -> Result<Self> {
         Self::open_with(path, &Credentials::Password(password), config)
     }
 
@@ -106,7 +134,7 @@ impl VaultStore {
     /// # Erreurs
     /// Voir [`Vault::open_with`], plus les erreurs de décodage du corps.
     pub fn open_with(
-        path: &std::path::Path,
+        path: &Path,
         credentials: &Credentials<'_>,
         config: &VaultConfig,
     ) -> Result<Self> {
@@ -196,7 +224,7 @@ impl VaultStore {
 
     /// Chemin du coffre.
     #[must_use]
-    pub fn path(&self) -> &std::path::Path {
+    pub fn path(&self) -> &Path {
         self.vault.path()
     }
 
@@ -448,6 +476,293 @@ impl VaultStore {
         });
         self.dirty = true;
         Ok(id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Pièces jointes
+    // -----------------------------------------------------------------------
+
+    /// Répertoire des blobs de ce coffre.
+    ///
+    /// La règle de nommage est **unique** (`attachment::blob_dir_for`) et partagée par
+    /// le coffre vivant, la sauvegarde et la vérification : elle n'est jamais devinée.
+    #[must_use]
+    pub fn attachment_dir(&self) -> PathBuf {
+        attachment::blob_dir_for(self.path())
+    }
+
+    /// Chemin du fichier d'un blob.
+    ///
+    /// # Erreurs
+    /// [`Error::Internal`] si la dérivation du nom échoue.
+    pub fn blob_path(&self, id: &BlobId) -> Result<PathBuf> {
+        Ok(self.attachment_dir().join(self.blob_name(id)?))
+    }
+
+    /// Nom de fichier dérivé d'un blob.
+    fn blob_name(&self, id: &BlobId) -> Result<String> {
+        attachment::blob_file_name(self.vault.subkeys(), &self.vault.header().vault_id, *id)
+    }
+
+    /// Pièces jointes d'une entrée, dans l'ordre de l'archive.
+    #[must_use]
+    pub fn attachments_of(&self, entry: &EntryId) -> Vec<&AttachmentMeta> {
+        self.archive
+            .attachments
+            .iter()
+            .filter(|meta| meta.entry == *entry)
+            .collect()
+    }
+
+    /// Pièce jointe par identifiant.
+    #[must_use]
+    pub fn attachment(&self, id: &BlobId) -> Option<&AttachmentMeta> {
+        self.archive.attachments.iter().find(|meta| meta.id == *id)
+    }
+
+    /// Ajoute une pièce jointe, en écrivant son blob **avant** d'enregistrer sa
+    /// métadonnée.
+    ///
+    /// # Ordre, et pourquoi il est imposé ici
+    ///
+    /// `I-BLOB-ORDER`. La séquence est : scellement → durabilité du blob → **puis**
+    /// ajout de la métadonnée, laquelle n'atteint le disque qu'au prochain
+    /// [`VaultStore::save`]. Un incident entre les deux laisse donc un **orphelin** —
+    /// invisible et inoffensif, récupérable par `attach gc`. L'ordre inverse
+    /// produirait une métadonnée sans son fichier, c'est-à-dire une **promesse non
+    /// tenue** : le coffre annoncerait une pièce jointe que `attach get` ne pourrait pas
+    /// restituer.
+    ///
+    /// # Collision de nom
+    ///
+    /// Le nom de fichier est un HMAC **tronqué à 128 bits** : une collision est
+    /// improbable, jamais impossible. `O_EXCL` reste la garantie ultime — il refuse
+    /// d'écraser quoi que ce soit, y compris un fichier étranger déposé au même nom.
+    /// En cas de collision, un **nouvel identifiant** est tiré et le nom recalculé,
+    /// jusqu'à [`MAX_BLOB_NAME_ATTEMPTS`] fois. Ce cas n'est jamais supposé impossible.
+    ///
+    /// # Erreurs
+    /// * [`Error::ReadOnly`] sur un coffre ouvert en lecture seule ;
+    /// * [`Error::InvalidHeader`] si l'entrée n'existe pas, ou s'il y a déjà
+    ///   [`MAX_ATTACHMENTS`] pièces jointes ;
+    /// * [`Error::MalformedLength`] si le nom est vide ou trop long ;
+    /// * [`Error::InvalidInput`] si la source dépasse la taille maximale, ou change de
+    ///   taille pendant la lecture ;
+    /// * [`Error::Io`] pour toute erreur de fichier.
+    pub fn add_attachment(
+        &mut self,
+        entry: &EntryId,
+        name: &str,
+        source: &Path,
+    ) -> Result<AttachmentMeta> {
+        if self.vault.is_read_only() {
+            return Err(Error::ReadOnly);
+        }
+
+        // Toutes les vérifications **avant** d'écrire quoi que ce soit sur le disque.
+        if self.archive.entry(entry).is_none() {
+            return Err(Error::InvalidHeader {
+                reason: "pièce jointe rattachée à une entrée inexistante",
+            });
+        }
+        if name.is_empty() || name.len() > MAX_ATTACHMENT_NAME_LEN {
+            return Err(Error::MalformedLength {
+                reason: "nom de pièce jointe invalide",
+            });
+        }
+        if self.archive.attachments.len() >= MAX_ATTACHMENTS {
+            return Err(Error::InvalidHeader {
+                reason: "trop de pièces jointes",
+            });
+        }
+
+        let mut origin = fs::open_read(source)?;
+        let size = origin.metadata()?.len();
+        if size > attachment::MAX_ATTACHMENT_BYTES {
+            return Err(Error::InvalidInput {
+                reason: "pièce jointe au-delà de la taille maximale",
+            });
+        }
+
+        let dir = self.attachment_dir();
+        Self::ensure_attachment_dir(&dir)?;
+
+        let vault_id = self.vault.header().vault_id;
+        let sealed = self.seal_new_blob(&dir, &vault_id, size, &mut origin)?;
+
+        let meta = AttachmentMeta {
+            id: sealed.header.blob_id,
+            entry: *entry,
+            name: name.to_string(),
+            size: sealed.header.plaintext_size,
+            chunk_size: sealed.header.chunk_size,
+            chunk_count: sealed.header.chunk_count,
+            created_at: now_unix(),
+            content_mac: sealed.content_mac,
+        };
+
+        // `AuditKind` est un ensemble **fermé** à valeurs d'octets fixes : y ajouter une
+        // variante rendrait tout coffre écrit par ce binaire illisible par l'ancien
+        // (ADR-025). Rien n'est donc ajouté — et `EntryUpdated` décrit exactement ce qui
+        // vient de se passer : l'entrée a changé.
+        let stored = meta.duplicate();
+        self.archive.attachments.push(meta);
+        self.record(AuditKind::EntryUpdated, Some(*entry));
+        self.dirty = true;
+        Ok(stored)
+    }
+
+    /// Retire la métadonnée d'une pièce jointe, **sans toucher au fichier**.
+    ///
+    /// # Ordre
+    ///
+    /// `I-BLOB-ORDER`, sens inverse : la métadonnée d'abord, le fichier ensuite — ou
+    /// jamais, s'il devient un orphelin. L'appelant peut enchaîner sur
+    /// [`VaultStore::save`] puis [`VaultStore::purge_blob`], ce qui donne l'ordre
+    /// attendu : le coffre ne référence plus le blob **avant** que le fichier
+    /// disparaisse. Si le processus s'arrête entre les deux, il reste un orphelin.
+    ///
+    /// # Erreurs
+    /// [`Error::ReadOnly`], ou [`Error::InvalidHeader`] si l'identifiant est inconnu.
+    /// Retirer une pièce jointe déjà absente échoue explicitement : c'est une opération
+    /// qui libère un fichier, et viser une cible absente signale une erreur de cible.
+    pub fn remove_attachment(&mut self, id: &BlobId) -> Result<AttachmentMeta> {
+        if self.vault.is_read_only() {
+            return Err(Error::ReadOnly);
+        }
+        let index = self
+            .archive
+            .attachments
+            .iter()
+            .position(|meta| meta.id == *id)
+            .ok_or(Error::InvalidHeader {
+                reason: "pièce jointe inconnue",
+            })?;
+
+        let meta = self.archive.attachments.remove(index);
+        self.record(AuditKind::EntryUpdated, Some(meta.entry));
+        self.dirty = true;
+        Ok(meta)
+    }
+
+    /// Supprime physiquement le fichier d'un blob.
+    ///
+    /// # Quand l'appeler
+    ///
+    /// **Après** [`VaultStore::remove_attachment`] **et** [`VaultStore::save`]. C'est
+    /// l'ordre `I-BLOB-ORDER` en suppression : le coffre ne référence plus le blob avant
+    /// que le fichier disparaisse. Appelée dans l'autre sens, elle produirait une
+    /// métadonnée sans son fichier — une promesse non tenue.
+    ///
+    /// # Erreurs
+    /// [`Error::Internal`] si la dérivation du nom échoue, [`Error::Io`] si la
+    /// suppression échoue. Un échec laisse un **orphelin**, que `attach gc` récupère :
+    /// ce n'est jamais une incohérence.
+    pub fn purge_blob(&self, id: &BlobId) -> Result<()> {
+        self.delete_blob_by_name(&self.blob_name(id)?)
+    }
+
+    /// Supprime un fichier du répertoire des blobs, **par son nom**.
+    ///
+    /// # Pourquoi par nom, et pas par chemin
+    ///
+    /// Un chemin arbitraire laisserait la suppression sortir du répertoire des blobs.
+    /// Le nom est ici **revalidé** (`is_blob_name`) avant toute opération, et il est
+    /// résolu **relativement au répertoire des blobs** : cette méthode ne peut donc pas
+    /// viser un fichier étranger ni un autre répertoire, quoi que lui passe l'appelant.
+    ///
+    /// # Erreurs
+    /// [`Error::InvalidInput`] si le nom ne peut pas être un nom de blob.
+    pub fn delete_blob_by_name(&self, name: &str) -> Result<()> {
+        if !attachment::is_blob_name(name) {
+            return Err(Error::InvalidInput {
+                reason: "ce nom ne peut pas être celui d'un blob",
+            });
+        }
+        fs::remove_file(&self.attachment_dir().join(name))?;
+        Ok(())
+    }
+
+    /// Crée le répertoire des blobs s'il n'existe pas encore.
+    ///
+    /// `mkdirat` **est** le contrôle d'existence : il n'y a donc **aucun**
+    /// `path_exists` préalable, et donc aucune fenêtre entre la vérification et la
+    /// création. Un `AlreadyExists` signifie simplement qu'un autre appel l'a créé —
+    /// ce n'est pas une erreur.
+    fn ensure_attachment_dir(dir: &Path) -> Result<()> {
+        match fs::create_dir_private(dir) {
+            Ok(level) => check_durability(level),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(err) => Err(Error::Io(err)),
+        }
+    }
+
+    /// Écrit un blob neuf sous un nom **libre**, et le rend durable.
+    ///
+    /// # Pourquoi une boucle
+    ///
+    /// Le nom est un HMAC tronqué à 128 bits : une collision est improbable, **jamais
+    /// impossible**. `create_private_file` repose sur `O_EXCL`, qui refuse d'écraser
+    /// quoi que ce soit — y compris un fichier étranger déposé au même nom. En cas de
+    /// collision, un nouvel identifiant est tiré et le nom recalculé. Rien n'est jamais
+    /// écrasé, et le cas n'est jamais supposé impossible.
+    ///
+    /// La collision est détectée **avant** de lire la source : réessayer ne consomme
+    /// donc pas le flux, et la nouvelle tentative lit bien l'intégralité de l'entrée.
+    fn seal_new_blob(
+        &self,
+        dir: &Path,
+        vault_id: &[u8; 16],
+        size: u64,
+        source: &mut std::fs::File,
+    ) -> Result<attachment::SealedBlob> {
+        for _ in 0..MAX_BLOB_NAME_ATTEMPTS {
+            let id = BlobId::generate()?;
+            let name = attachment::blob_file_name(self.vault.subkeys(), vault_id, id)?;
+            let path = dir.join(&name);
+
+            let mut file = match fs::create_private_file(&path) {
+                Ok(file) => file,
+                // Collision de nom, ou fichier étranger au même nom : on retire un
+                // identifiant et on recommence. Jamais d'écrasement.
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(Error::Io(err)),
+            };
+
+            let sealed = match attachment::seal_blob(
+                id,
+                vault_id,
+                self.vault.subkeys(),
+                size,
+                source,
+                &mut file,
+            ) {
+                Ok(sealed) => sealed,
+                Err(err) => {
+                    // Le fichier est le nôtre : on l'a créé en exclusif à l'instant.
+                    drop(file);
+                    let _ = fs::remove_file(&path);
+                    return Err(err);
+                }
+            };
+
+            let level = match fs::make_durable(&file, dir) {
+                Ok(level) => level,
+                Err(err) => {
+                    drop(file);
+                    let _ = fs::remove_file(&path);
+                    return Err(Error::Io(err));
+                }
+            };
+            drop(file);
+            check_durability(level)?;
+
+            return Ok(sealed);
+        }
+
+        Err(Error::Internal {
+            invariant: "aucun nom de blob libre après plusieurs tirages",
+        })
     }
 
     // -----------------------------------------------------------------------

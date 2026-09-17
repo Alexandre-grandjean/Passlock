@@ -126,7 +126,10 @@ Propriétés que le code garantit, chacune couverte par au moins un test.
 | I13 | Un slot déplacé vers un autre rôle ne s'ouvre pas | `header` : le rôle entre dans l'AAD du slot ; `tests/key_slots.rs` |
 | I14 | Chaque rôle de slot est présent **au plus une fois** — imposé par l'**API** du coffre, **jamais par `Header::validate`** | `vault` : `install_slot` refuse un rôle déjà présent ; `tests/key_slots.rs` |
 | I15 | Un fichier sensible neuf n'est jamais créé en écrasant une cible existante | `passlock-platform` : `O_CREAT\|O_EXCL` / `CREATE_NEW` ; `tests/fs_private.rs` |
-| I16 | Un blob est durable avant que sa métadonnée soit enregistrée *(Unix)* | `passlock-platform` : `sync_file` **puis** `sync_dir` ; `tests/fs_private.rs` |
+| I16 | Un blob est durable avant que sa métadonnée soit enregistrée *(Unix)* | `passlock-platform` : `sync_file` **puis** `sync_dir` ; `tests/fs_private.rs`, `tests/attachment_store.rs` |
+| I17 | Un morceau de blob est authentifié **sous sa position** : ni réordonnancement, ni duplication, ni transplantation | `attachment` : l'AAD contient le header, le coffre et l'index ; `tests/attachment_format.rs` |
+| I18 | Un blob référencé n'est **jamais** candidat au ramasse-miettes, même corrompu ou absent | `attachment::sweep_blobs` classe par **présence** ; `tests/attachment_store.rs` |
+| I19 | Un fichier sensible n'est jamais publié en écrasant une cible existante | `passlock-platform` : `linkat` / `MoveFileExW` sans remplacement ; `tests/fs_private.rs` |
 
 ## 6. Ce qui n'est pas dans le cœur, et pourquoi
 
@@ -152,7 +155,7 @@ identifié serait une extension qui impose de réécrire quelque chose.
 | **3** | générateur et TOTP *(livré)* | nouveau module dans le cœur, **hors du chemin critique de la clé** ; le secret TOTP est un `Field` ordinaire |
 | **4** | clé de récupération *(**livrée** — étape 1)* | `derive_master_kek` est devenu `derive_slot_kek(header, label, secret)` : le slot est choisi par **rôle** au lieu d'être cherché comme slot maître, et `unlock_with_kek(bytes, kek, label)` désenveloppe le slot visé. **Un seul chemin de dérivation** — Argon2id puis HKDF — pour les trois rôles, sans branche. Le **slot label 2 était déjà réservé** depuis la phase 1 : aucun changement de format |
 | **4** | clé matérielle *(**livrée** — étape 1)* | **Même point d'insertion** : `unlock_with_kek` et `install_slot` ne connaissent que le rôle. La KEK provient du contenu d'un fichier de 32 octets au lieu d'une phrase transcrite. Le fichier est écrit par `create_private_file` (**création exclusive**) et non par `write_atomic`, dont la sémantique de remplacement écraserait une clé existante |
-| **4** | pièces jointes | `SubKeys::attachments`, **déjà dérivée** depuis la phase 1 ; la section de métadonnées existe déjà dans l'archive (phase 2), bornée et présente même vide |
+| **4** | pièces jointes *(**livrée** — étape 2)* | `SubKeys::attachments` était **déjà dérivée** depuis la phase 1 ; la section de métadonnées **existait déjà** dans l'archive (phase 2), bornée et présente même vide. **Aucun changement de format.** Un second niveau de dérivation a été ajouté sous `K_attachments` (`blob-name`, `blob-aead`), et la racine est **détruite après usage** : `I-KEYDOMAIN` est structurel. Les blobs vivent hors du conteneur, dans `<coffre>.attachments/`, et **hors de la portée de son tag** — voir `docs/ATTACHMENT_FORMAT.md` |
 | **4** | import/export | couche de traduction au-dessus de `Archive` — aucun point d'insertion dans le format |
 | **4** | presse-papiers | `passlock-platform`, à côté de `tty` et `process` : c'est du code plateforme, pas du cœur. **À réexaminer** : une dépendance pure Rust n'apporte aucun `unsafe`, et la placer dans `passlock-platform` — dont `passlock-core` dépend — ferait entrer son arbre dans celui du cœur (`I12`). Décision reportée à la porte E.0, §8.1 du plan |
 | **5** | analyse d'URL | **pur, sans accès au coffre** : prend une chaîne, rend un verdict. Fonction libre, aucun état, aucune I/O |

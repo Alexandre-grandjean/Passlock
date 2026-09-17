@@ -696,6 +696,63 @@ pub(crate) const fn platform_durability() -> Durability {
     Durability::DirectoryEntrySynced
 }
 
+/// Publie un fichier temporaire sous son nom définitif, **sans écraser**.
+///
+/// # Pourquoi `linkat` plutôt qu'un renommage
+///
+/// Un renommage classique **remplace** la cible. Ici l'écrasement doit être impossible :
+/// la cible est choisie par l'utilisateur, et le fichier qui s'y trouve déjà ne nous
+/// appartient pas. `linkat` refuse si la cible existe, et la pose du lien est
+/// **atomique** : à aucun moment la cible n'existe à moitié.
+///
+/// C'est ce qui permet à `attach get` d'écrire le clair dans un temporaire et de ne le
+/// publier qu'**après** le verdict de fin de flux : une pièce jointe tronquée ne se
+/// présente jamais comme un fichier complet.
+///
+/// Les deux chemins doivent désigner le **même répertoire** — un lien ne traverse pas
+/// les systèmes de fichiers.
+///
+/// # Erreurs
+/// `AlreadyExists` si la cible existe ; `InvalidInput` si les deux chemins ne sont pas
+/// dans le même répertoire ; l'erreur du système sinon (système de fichiers sans liens
+/// durs, par exemple).
+pub fn publish_no_replace(temp: &Path, target: &Path) -> io::Result<()> {
+    let (dir, temp_name) = split_target(temp)?;
+    let (target_dir, target_name) = split_target(target)?;
+    if dir != target_dir {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "le temporaire et sa cible doivent être dans le même répertoire",
+        ));
+    }
+
+    let dir_guard = open_dir_no_symlinks(&dir)?;
+    let fd = dir_guard.as_raw_fd();
+    let temp_c = to_cstring(&temp_name, "le nom du fichier temporaire")?;
+    let target_c = to_cstring(&target_name, "le nom du fichier cible")?;
+
+    // SAFETY: les deux chaînes C sont valides et vivantes, et `fd` désigne le
+    // répertoire des deux noms. `linkat` **refuse** d'écraser une cible existante :
+    // c'est exactement la sémantique voulue, et elle est atomique.
+    if unsafe { libc::linkat(fd, temp_c.as_ptr(), fd, target_c.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Le nom définitif est posé : on retire le temporaire. Un échec ici laisserait deux
+    // noms pour le même contenu — sans conséquence pour l'intégrité.
+    // SAFETY: `temp_c` est valide et vivante ; l'entrée existe, on vient de la lier.
+    if unsafe { libc::unlinkat(fd, temp_c.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // L'apparition du nom définitif n'est durable qu'après `fsync` du répertoire.
+    // SAFETY: `fd` est un descripteur de répertoire ouvert.
+    if unsafe { libc::fsync(fd) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Verrou exclusif sur un coffre.
 ///
 /// Le champ `file` n'est jamais lu directement : il est conservé pour que le

@@ -7,17 +7,18 @@ mécanisme de récupération à distance, aucune télémétrie, aucune synchroni
 propriétaire — et ces absences sont des choix de conception, pas des
 fonctionnalités manquantes.
 
-> **Statut : phases 0 à 3 terminées et approuvées. Phase 4 en cours — étape 1 sur 5 close.**
+> **Statut : phases 0 à 3 terminées et approuvées. Phase 4 en cours — étapes 1 et 2 sur 5 closes.**
 >
 > Existent et sont testés : le moteur cryptographique et le format de coffre
 > (phase 1), le cœur de stockage — modèle de données, archive, migration, recherche,
 > historique, corbeille (phase 2), le générateur de secrets avec le TOTP (phase 3),
-> et la **récupération** — clé de récupération et fichier-clé (phase 4, étape 1 sur 5).
+> la **récupération** — clé de récupération et fichier-clé — et les **pièces jointes**
+> chiffrées (phase 4, étapes 1 et 2 sur 5).
 >
-> N'existent **pas encore** : pièces jointes, sauvegardes, test de restauration,
-> import/export et presse-papiers *(phase 4, étapes 2 à 5)* ; centre de sécurité et
-> analyse d'URL *(phase 5)* ; interface graphique *(phase 6)* ; audit externe, SBOM et
-> build reproductible *(phase 7)*.
+> N'existent **pas encore** : sauvegardes, test de restauration, import/export et
+> presse-papiers *(phase 4, étapes 3 à 5)* ; centre de sécurité et analyse d'URL
+> *(phase 5)* ; interface graphique *(phase 6)* ; audit externe, SBOM et build
+> reproductible *(phase 7)*.
 >
 > Le contenu des phases fait autorité dans **[`ROADMAP.md`](ROADMAP.md)**.
 
@@ -48,6 +49,8 @@ fonctionnalités manquantes.
 * **Ajouter un fichier-clé** sur support amovible, et ouvrir le coffre avec lui.
 * **Vérifier qu'une clé de récupération ouvre réellement le coffre** — une clé jamais
   essayée n'est pas une récupération.
+* **Attacher des fichiers** à une entrée, chiffrés séparément du coffre, et les restituer.
+* **Vérifier l'intégrité des pièces jointes** et supprimer les blobs devenus orphelins.
 
 ## Ce que ce logiciel ne fait pas — et ne fera pas
 
@@ -247,6 +250,8 @@ techniquement ni juridiquement.
 | [`docs/TOTP.md`](docs/TOTP.md) | Modèle TOTP : ce qui est supporté, pourquoi SHA-1 est légitime, **l'horloge n'est pas vérifiée**, injection termininale, ce qui n'est pas revendiqué |
 | [`crates/passlock-core/data/wordlists/ATTRIBUTION.md`](crates/passlock-core/data/wordlists/ATTRIBUTION.md) | Provenance, licence et empreinte des deux listes de mots embarquées |
 | [`docs/AUDIT_PHASE4_1_RECUPERATION.md`](docs/AUDIT_PHASE4_1_RECUPERATION.md) | **Audit de la phase 4, étape 1** : clé de récupération, fichier-clé, création exclusive et durabilité, défaut de perte de données trouvé |
+| [`docs/ATTACHMENT_FORMAT.md`](docs/ATTACHMENT_FORMAT.md) | Le **format des pièces jointes** octet par octet : découpage, AAD, ce que l'AEAD ne protège **pas**, ordre d'écriture, ramasse-miettes |
+| [`docs/AUDIT_PHASE4_2_PIECES_JOINTES.md`](docs/AUDIT_PHASE4_2_PIECES_JOINTES.md) | **Audit de la phase 4, étape 2** : domaines de clés, format de blob, ramasse-miettes, oracle faux trouvé par le fuzzing |
 | [`docs/AUDIT_PHASE3.md`](docs/AUDIT_PHASE3.md) | Audit adversarial du générateur et du TOTP : 35 vecteurs RFC, fuzzing, secret en mémoire, défauts trouvés |
 | [`docs/AUDIT_PHASE2_SEMANTIQUE.md`](docs/AUDIT_PHASE2_SEMANTIQUE.md) | **Audit sémantique** du magasin par modèle de référence : 9 500 opérations comparées, 18 invariants |
 | [`docs/AUDIT_PHASE2.md`](docs/AUDIT_PHASE2.md) | Audit adversarial du cœur de stockage |
@@ -257,7 +262,7 @@ techniquement ni juridiquement.
 Les affirmations de sécurité de ce projet sont vérifiables :
 
 ```sh
-cargo test --workspace          # 528 tests, dont 27 attaques adversariales et 9 500
+cargo test --workspace          # 556 tests, dont 27 attaques adversariales et 9 500
                                 # opérations comparées à un modèle de référence
 cargo deny check                # avis de sécurité, licences, bans, sources
 
@@ -290,8 +295,19 @@ passlock recovery test COFFRE < cle-fausse.txt   # → « total de contrôle …
 passlock keyfile new COFFRE --key-file /media/cle/coffre.key
 stat -c '%a %n' /media/cle/coffre.key            # 600
 
+# Les pièces jointes : le blob survit au coffre, et l'ordre d'écriture est vérifiable
+passlock attach add COFFRE "$ID" document.pdf
+passlock attach get COFFRE "$BLOB" --output copie.pdf   # refuse d'écraser une cible
+passlock attach verify COFFRE    # observe et signale ; ne supprime RIEN
+passlock attach gc COFFRE --confirm "$VAULT_ID"         # supprime les seuls orphelins
+
+# Ce que l'AEAD ne protège pas : une troncature propre est détectée par la métadonnée
+truncate -s -100 COFFRE.attachments/<blob>
+passlock attach verify COFFRE    # → défaut signalé, et le blob est PRÉSERVÉ
+
 # Le fuzzing, cible par cible (nightly requis)
-cd fuzz && cargo +nightly fuzz run parse_recovery_key -- -max_total_time=60
+cd fuzz && cargo +nightly fuzz run parse_recovery_key --  -max_total_time=60
+cd fuzz && cargo +nightly fuzz run parse_attachment_blob -- -max_total_time=60
 ```
 
 ## État de vérification
@@ -307,6 +323,12 @@ trouvé, et ce qui reste **non vérifié**.
 * **Phase 2** — [`docs/AUDIT_PHASE2.md`](docs/AUDIT_PHASE2.md) et
   [`docs/AUDIT_PHASE2_SEMANTIQUE.md`](docs/AUDIT_PHASE2_SEMANTIQUE.md).
 * **Phase 3** — [`docs/AUDIT_PHASE3.md`](docs/AUDIT_PHASE3.md).
+* **Phase 4, étape 2 — pièces jointes** —
+  [`docs/AUDIT_PHASE4_2_PIECES_JOINTES.md`](docs/AUDIT_PHASE4_2_PIECES_JOINTES.md) :
+  **40,5 millions** d'exécutions de fuzzing, et **un défaut trouvé** — non dans le produit,
+  mais dans **mon propre harnais** : une assertion affirmait une règle que le code
+  n'applique pas, ce qui aurait « validé » un durcissement cassant la compatibilité de
+  lecture.
 * **Phase 4, étape 1 — récupération** —
   [`docs/AUDIT_PHASE4_1_RECUPERATION.md`](docs/AUDIT_PHASE4_1_RECUPERATION.md) :
   **un défaut de gravité élevée**, trouvé par un test. Le nettoyage d'un fichier-clé

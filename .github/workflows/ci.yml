@@ -164,3 +164,7 @@ jobs:
       - name: Fuzzer le décodage des clés de récupération
         run: cargo +nightly fuzz run parse_recovery_key -- -max_total_time=120 -rss_limit_mb=2048
         working-directory: fuzz
+
+      - name: Fuzzer le décodage des headers de pièce jointe
+        run: cargo +nightly fuzz run parse_attachment_blob -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz

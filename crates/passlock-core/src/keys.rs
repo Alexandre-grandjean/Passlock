@@ -15,9 +15,40 @@
 //!        DEK   clé de données       — aléatoire sur 256 bits, créée UNE fois
 //!          │  HKDF-SHA256, une étiquette par usage
 //!          ├──────────────► K_records      (payload du conteneur)
-//!          ├──────────────► K_attachments  (blobs de pièces jointes)
-//!          └──────────────► K_index        (index aveugles, sentinelle de rollback)
+//!          ├──────────────► K_index        (index aveugles, sentinelle, MAC de contenu)
+//!          └──────────────► K_attachments  **racine de domaine**, jamais une clé de travail
+//!                                 │
+//!                                 ├──► K_blob_name   (HMAC : nom de fichier d'un blob)
+//!                                 └──► K_blob_aead   (XChaCha20-Poly1305 : contenu d'un blob)
 //! ```
+//!
+//! ## Pourquoi un second niveau sous `K_attachments`
+//!
+//! Les trois sous-clés de premier niveau séparent des **domaines** : chacune n'est
+//! employée que par **une** primitive. `K_attachments` serait la première exception —
+//! il lui faudrait servir à la fois de clé HMAC (nom de fichier) et de clé AEAD
+//! (contenu). La séparation évite cette réutilisation, et elle n'est pas gratuite par
+//! principe : le **nom de fichier d'un blob est publié** — il suffit de lire le
+//! répertoire — donc tout processus local obtiendrait des sorties HMAC connues sous la
+//! clé qui protégerait la confidentialité des mêmes pièces jointes.
+//!
+//! Formulation exacte : cette réutilisation **n'est pas exploitée, elle est inutile**.
+//! Aucune attaque pratique n'est connue contre HMAC-SHA256 et ChaCha20 employés sous la
+//! même clé. Le projet refuse simplement de reposer sur une hypothèse non prouvée quand
+//! la séparation coûte un appel à [`expand`], déjà écrit.
+//!
+//! ## `K_index`, au contraire, n'est pas scindée
+//!
+//! Elle sert trois usages, tous de la **même** primitive — HMAC-SHA256 — et la
+//! séparation y est déjà assurée par une **étiquette versionnée en préfixe du
+//! message** : `passlock/v1/sentinel-name`, `passlock/v1/sentinel-mac`,
+//! `passlock/v1/attachment-content-mac`. Scinder `K_index` par ailleurs, tout en
+//! laissant la sentinelle l'employer brute, donnerait **deux mécanismes pour le même
+//! problème** — moins cohérent, pas plus sûr.
+//!
+//! D'où la règle unique, `I-KEYDOMAIN` : *une clé n'est jamais employée par deux
+//! primitives. À primitive unique et usages multiples, l'étiquette va en préfixe du
+//! message. Une racine de domaine n'est jamais une clé de travail.*
 //!
 //! ## Pourquoi une DEK distincte plutôt que « la clé dérivée du mot de passe »
 //!
@@ -101,6 +132,27 @@ const INFO_KEK: &[u8] = b"passlock/v1/kek";
 const INFO_RECORDS: &[u8] = b"passlock/v1/records";
 const INFO_ATTACHMENTS: &[u8] = b"passlock/v1/attachments";
 const INFO_INDEX: &[u8] = b"passlock/v1/index";
+
+/// Second niveau sous [`INFO_ATTACHMENTS`] : clé **HMAC** des noms de blob.
+const INFO_BLOB_NAME: &[u8] = b"passlock/v1/blob-name";
+
+/// Second niveau sous [`INFO_ATTACHMENTS`] : clé **AEAD** du contenu des blobs.
+const INFO_BLOB_AEAD: &[u8] = b"passlock/v1/blob-aead";
+
+/// Toutes les étiquettes de dérivation, pour les vérifications globales.
+///
+/// Un test vérifie qu'elles sont toutes versionnées et qu'**aucune n'est préfixe d'une
+/// autre** : deux étiquettes dont l'une préfixe l'autre sont une invitation à ce qu'une
+/// extension future les confonde.
+#[cfg(test)]
+const ALL_INFO_LABELS: &[&[u8]] = &[
+    INFO_KEK,
+    INFO_RECORDS,
+    INFO_ATTACHMENTS,
+    INFO_INDEX,
+    INFO_BLOB_NAME,
+    INFO_BLOB_AEAD,
+];
 
 /// Clé maître dérivée du mot de passe maître.
 ///
@@ -245,9 +297,19 @@ impl DataEncryptionKey {
     /// # Erreurs
     /// [`Error::Internal`] si HKDF refuse la longueur de sortie.
     pub fn subkeys(&self) -> Result<SubKeys> {
+        // `K_attachments` est la **racine** du domaine des pièces jointes. Elle est
+        // dérivée, employée pour produire les deux clés de travail, puis **détruite
+        // immédiatement** : elle n'est pas conservée dans `SubKeys`, et ne peut donc
+        // pas être employée comme clé. C'est `I-KEYDOMAIN` rendu structurel.
+        let attachments: Key<KEY_LEN> = expand(&self.0, INFO_ATTACHMENTS)?;
+        let blob_name = expand(&attachments, INFO_BLOB_NAME)?;
+        let blob_aead = expand(&attachments, INFO_BLOB_AEAD)?;
+        drop(attachments);
+
         Ok(SubKeys {
             records: expand(&self.0, INFO_RECORDS)?,
-            attachments: expand(&self.0, INFO_ATTACHMENTS)?,
+            blob_name,
+            blob_aead,
             index: expand(&self.0, INFO_INDEX)?,
         })
     }
@@ -267,10 +329,36 @@ impl std::fmt::Debug for DataEncryptionKey {
 pub struct SubKeys {
     /// Chiffrement du payload du conteneur.
     pub records: Key<KEY_LEN>,
-    /// Chiffrement des blobs de pièces jointes.
-    pub attachments: Key<KEY_LEN>,
-    /// Calcul des index aveugles et de la sentinelle anti-rollback.
+    /// Calcul des index aveugles, de la sentinelle anti-rollback **et du MAC de
+    /// contenu d'une pièce jointe**.
+    ///
+    /// Ces trois usages relèvent de la **même** primitive, HMAC-SHA256, et sont
+    /// séparés par une étiquette en préfixe de message — jamais par une clé dédiée.
+    /// Voir l'en-tête du module.
     pub index: Key<KEY_LEN>,
+
+    /// Nom de fichier d'un blob — **HMAC-SHA256 seulement**.
+    ///
+    /// Dérivée de `K_attachments`, qui n'est **pas conservée** : une racine de domaine
+    /// n'est jamais une clé de travail (`I-KEYDOMAIN`).
+    blob_name: Key<KEY_LEN>,
+
+    /// Contenu d'un blob — **XChaCha20-Poly1305 seulement**.
+    blob_aead: Key<KEY_LEN>,
+}
+
+impl SubKeys {
+    /// Clé du nom de fichier d'un blob. Ne sert **qu'**à HMAC.
+    #[must_use]
+    pub fn blob_name(&self) -> &Key<KEY_LEN> {
+        &self.blob_name
+    }
+
+    /// Clé du contenu d'un blob. Ne sert **qu'**à l'AEAD.
+    #[must_use]
+    pub fn blob_aead(&self) -> &Key<KEY_LEN> {
+        &self.blob_aead
+    }
 }
 
 /// DEK enveloppée, telle que stockée dans un slot du header.
@@ -498,10 +586,91 @@ mod tests {
         // domaines serait fictive.
         let dek = DataEncryptionKey::generate().expect("dek");
         let sub = dek.subkeys().expect("sous-clés");
+        let root = expand(&dek.0, INFO_ATTACHMENTS).expect("racine");
 
-        assert!(!sub.records.constant_time_eq(&sub.attachments));
         assert!(!sub.records.constant_time_eq(&sub.index));
-        assert!(!sub.attachments.constant_time_eq(&sub.index));
+        assert!(!sub.records.constant_time_eq(&root));
+        assert!(!sub.index.constant_time_eq(&root));
+    }
+
+    #[test]
+    fn the_blob_keys_are_distinct_from_every_other_key() {
+        // `I-KEYDOMAIN` : `K_blob_name` sert à HMAC, `K_blob_aead` à l'AEAD, et
+        // **aucune** des deux n'est la racine ni une autre sous-clé.
+        let dek = DataEncryptionKey::generate().expect("dek");
+        let sub = dek.subkeys().expect("sous-clés");
+        let root = expand(&dek.0, INFO_ATTACHMENTS).expect("racine");
+
+        let others = [
+            ("records", &sub.records),
+            ("index", &sub.index),
+            ("attachments", &root),
+        ];
+        for (name, other) in others {
+            assert!(
+                !sub.blob_name().constant_time_eq(other),
+                "K_blob_name ne doit pas être {name}"
+            );
+            assert!(
+                !sub.blob_aead().constant_time_eq(other),
+                "K_blob_aead ne doit pas être {name}"
+            );
+        }
+        assert!(
+            !sub.blob_name().constant_time_eq(sub.blob_aead()),
+            "les deux clés dérivées doivent différer : l'une HMAC, l'autre AEAD"
+        );
+    }
+
+    #[test]
+    fn the_attachments_root_is_not_stored() {
+        // La racine n'est dérivée que le temps de produire les deux clés de travail :
+        // elle n'est **pas** conservée, donc elle ne peut pas être employée comme clé.
+        // Le test fige la propriété observable : `SubKeys` n'expose que deux clés de
+        // domaine « pièces jointes », et toutes deux diffèrent de la racine.
+        let dek = DataEncryptionKey::generate().expect("dek");
+        let sub = dek.subkeys().expect("sous-clés");
+        let root = expand(&dek.0, INFO_ATTACHMENTS).expect("racine");
+
+        assert!(!sub.blob_name().constant_time_eq(&root));
+        assert!(!sub.blob_aead().constant_time_eq(&root));
+    }
+
+    #[test]
+    fn the_blob_keys_are_deterministic_for_a_given_dek() {
+        let dek = DataEncryptionKey::from_bytes(&[0x22; KEY_LEN]).expect("dek");
+        let first = dek.subkeys().expect("sous-clés");
+        let second = dek.subkeys().expect("sous-clés");
+
+        assert!(first.blob_name().constant_time_eq(second.blob_name()));
+        assert!(first.blob_aead().constant_time_eq(second.blob_aead()));
+    }
+
+    #[test]
+    fn every_key_label_is_versioned_and_no_label_is_a_prefix_of_another() {
+        for label in ALL_INFO_LABELS {
+            let text = std::str::from_utf8(label).expect("étiquette UTF-8");
+            assert!(
+                text.starts_with("passlock/v1/"),
+                "l'étiquette « {text} » n'est pas versionnée"
+            );
+        }
+
+        // Aucune étiquette ne doit être le préfixe d'une autre : deux étiquettes
+        // emboîtées sont une invitation à ce qu'une extension future les confonde.
+        for (index, label) in ALL_INFO_LABELS.iter().enumerate() {
+            for (other_index, other) in ALL_INFO_LABELS.iter().enumerate() {
+                if index == other_index {
+                    continue;
+                }
+                assert!(
+                    !other.starts_with(label),
+                    "« {} » est un préfixe de « {} »",
+                    std::str::from_utf8(label).unwrap_or("?"),
+                    std::str::from_utf8(other).unwrap_or("?")
+                );
+            }
+        }
     }
 
     #[test]

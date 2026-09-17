@@ -694,6 +694,36 @@ pub(crate) const fn platform_durability() -> Durability {
     Durability::FileOnly
 }
 
+/// Publie un fichier temporaire sous son nom définitif, **sans écraser**.
+///
+/// `MoveFileExW` appelé **sans** `MOVEFILE_REPLACE_EXISTING` échoue si la cible existe :
+/// c'est la garantie voulue. `MOVEFILE_WRITE_THROUGH` est conservé pour que le
+/// déplacement soit écrit avant le retour de l'appel.
+///
+/// **NON VÉRIFIÉ À L'EXÉCUTION.**
+///
+/// # Erreurs
+/// L'erreur du système si la cible existe ou si le déplacement échoue.
+pub fn publish_no_replace(temp: &Path, target: &Path) -> io::Result<()> {
+    let temp_wide = to_wide(temp)?;
+    let target_wide = to_wide(target)?;
+
+    // SAFETY: les deux chaînes UTF-16 sont terminées par un nul et vivantes pour la
+    // durée de l'appel. L'absence de `MOVEFILE_REPLACE_EXISTING` est délibérée : elle
+    // fait échouer l'appel plutôt que d'écraser une cible existante.
+    let rc = unsafe {
+        MoveFileExW(
+            temp_wide.as_ptr(),
+            target_wide.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if rc == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Verrou exclusif sur un coffre.
 #[derive(Debug)]
 pub struct FileLock {

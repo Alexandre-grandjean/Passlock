@@ -930,6 +930,26 @@ impl Vault {
         &self.header
     }
 
+    /// Sous-clés d'usage, dont `K_records` et `K_index`.
+    ///
+    /// # Pourquoi cet accès est large, et pourquoi il est assumé
+    ///
+    /// La couche des pièces jointes a besoin de deux clés du domaine
+    /// `K_attachments` — cf. [`crate::attachment`] — et de `K_index` pour le MAC de
+    /// contenu. Les exposer une par une multiplierait les accesseurs pour un gain
+    /// nominal : `SubKeys` **est** la surface prévue pour la manipulation des
+    /// sous-clés, et elle ne quitte pas ce crate, dont l'objet est précisément la
+    /// gestion du matériel de clé.
+    ///
+    /// Ce qui **n'est pas** exposé : la DEK elle-même, qui exigerait
+    /// [`DataEncryptionKey::from_bytes`] et ne serait donc jamais obtenue par
+    /// distraction. Et la racine du domaine `K_attachments` **n'existe plus** après
+    /// `subkeys()` : elle est dérivée, employée, puis détruite (`I-KEYDOMAIN`).
+    #[must_use]
+    pub fn subkeys(&self) -> &SubKeys {
+        &self.subkeys
+    }
+
     /// Génération courante.
     #[must_use]
     pub fn generation(&self) -> u64 {

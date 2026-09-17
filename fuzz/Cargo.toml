@@ -1,0 +1,54 @@
+[package]
+name = "passlock-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Détache explicitement ce crate de l'espace de travail parent. Les cibles de
+# fuzzing exigent une toolchain nightly et des drapeaux de compilation que le reste
+# du projet ne doit pas hériter.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+passlock-core = { path = "../crates/passlock-core" }
+
+[[bin]]
+name = "vault_parse"
+path = "fuzz_targets/vault_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "header_decode"
+path = "fuzz_targets/header_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_decode"
+path = "fuzz_targets/payload_decode.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+[[bin]]
+name = "parse_otpauth"
+path = "fuzz_targets/parse_otpauth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_base32"
+path = "fuzz_targets/decode_base32.rs"
+test = false
+doc = false
+bench = false

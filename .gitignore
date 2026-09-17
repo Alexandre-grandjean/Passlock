@@ -1,0 +1,20 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Artefacts de coffres de test — ne doivent JAMAIS être commités,
+# même s'ils ne contiennent aucun secret réel.
+*.plk
+*.plk.tmp-*
+
+# Environnements de développement et état d'outillage : rien de tout cela
+# ne fait partie du produit livré.
+/.idea/
+/.commandcode/
+
+# Cibles et corpus du fuzzing : régénérables, volumineux, et propres à une
+# machine. Les *cibles* (`fuzz/fuzz_targets/`) et leur verrou (`fuzz/Cargo.lock`)
+# sont versionnés, eux.
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/

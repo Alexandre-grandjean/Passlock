@@ -1,0 +1,85 @@
+# Politique de chaîne d'approvisionnement, appliquée par `cargo deny check`.
+#
+# Vérifié réellement avec cargo-deny 0.20.2 sur l'arbre au 2026-09-16.
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+all-features = true
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = []
+yanked = "deny"
+
+[licenses]
+version = 2
+
+# Liste blanche **minimale** : exactement les licences présentes dans l'arbre, et
+# rien de plus.
+#
+# `unused-allowed-license = "deny"` force cette exactitude : une licence autorisée
+# mais inutilisée fait échouer la vérification. C'est délibéré. Une liste
+# d'autorisation qui contient des entrées « au cas où » autorise silencieusement des
+# dépendances futures qui n'ont jamais été examinées. Ajouter une licence doit être
+# une décision consciente, pas un effet de bord.
+#
+# Arbre au 2026-09-16, après l'ajout de `sha1` en phase 3 : **44 crates externes**,
+# dont les expressions de licence sont :
+#
+#     31 × MIT OR Apache-2.0
+#      8 × Apache-2.0 OR MIT
+#      2 × Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+#      1 × MIT OR Apache-2.0 OR LGPL-2.1-or-later
+#      1 × MIT
+#      1 × BSD-3-Clause
+#
+# NOTE DE CORRECTION. Une version antérieure de ce commentaire annonçait
+# « 33 crates en Apache-2.0, 37 en MIT, 1 en BSD-3-Clause », soit 71 crates. Le
+# décompte réel en comptait déjà 43 avant l'ajout de `sha1`. Un commentaire faux
+# dans un fichier de politique de sécurité est un défaut en soi : il donne
+# l'illusion d'une vérification. Le décompte ci-dessus est extrait de
+# `cargo metadata`, pas estimé.
+#
+# Les expressions composées passent parce qu'au moins une de leurs branches figure
+# dans la liste blanche : `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`
+# contient `Apache-2.0`, et `MIT OR Apache-2.0 OR LGPL-2.1-or-later` contient `MIT`.
+# `unused-allowed-license` ne s'en plaint pas, aucune licence autorisée n'étant
+# inutilisée.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+]
+confidence-threshold = 0.9
+unused-allowed-license = "deny"
+
+[bans]
+multiple-versions = "deny"
+
+# Les dépendances de l'espace de travail s'écrivent `{ workspace = true }` et se
+# résolvent en dépendances **de chemin**, internes au projet : elles ne viennent
+# d'aucun registre et ne portent aucun risque de chaîne d'approvisionnement. Sans
+# cette option, cargo-deny les signale comme des jokers, ce qui est un faux positif.
+# Un joker au sens du risque est `serde = "*"`, pas une référence à un crate du même
+# dépôt.
+allow-wildcard-paths = true
+wildcards = "deny"
+
+highlight = "all"
+deny = [
+    # Aucune implémentation cryptographique non maîtrisée ne doit entrer dans
+    # l'arbre. Les primitives viennent exclusivement de RustCrypto.
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+    { name = "ring" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

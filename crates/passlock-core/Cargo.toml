@@ -1,0 +1,60 @@
+[package]
+name = "passlock-core"
+description = "Moteur cryptographique et conteneur de coffre de Passlock. Aucune interface, aucun réseau."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Choix de dépendances du cœur cryptographique.
+#
+# Le budget de dépendances de ce crate est volontairement serré : chaque brique
+# supplémentaire est une brique à auditer et un vecteur de compromission de la
+# chaîne d'approvisionnement. Les crates listés ici sont les seuls autorisés dans
+# le chemin critique de la clé.
+#
+# Règle explicite : AUCUNE macro procédurale dans ce crate, et aucune
+# bibliothèque de (dé)sérialisation générique.
+#
+# `thiserror` est écarté : `Display` et `Error` sont écrits à la main.
+# La feature `derive` de `zeroize` est écartée : on utilise `Zeroizing<T>` et des
+# `Drop` manuels.
+# `ciborium`/`serde` sont écartés : le header du conteneur est le SEUL point où
+# nous traitons des données non fiables AVANT toute authentification. Il est donc
+# encodé selon un layout binaire explicite à offsets fixes, décrit dans
+# docs/VAULT_FORMAT.md, ce qui supprime purement et simplement le parseur.
+#
+# Effet mesuré sur l'arbre de dépendances : voir `cargo tree` et ADR-004.
+[dependencies]
+passlock-platform = { workspace = true }
+
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+# `sha1` est ajouté en phase 3 pour le TOTP, et pour lui seul.
+#
+# Motif : la RFC 6238 bâtit HOTP et TOTP sur HMAC, et non sur une primitive
+# nouvelle. `hmac` et `sha2` étaient déjà présents ; seule la fonction de hachage
+# SHA-1 manquait. `sha1` vient de la même famille (RustCrypto) que `sha2` et
+# partage la version de `digest` déjà dans l'arbre : aucune dépendance transitive
+# nouvelle n'est introduite.
+#
+# Ce n'est PAS une entorse à la règle « pas de SHA-1 » de la phase 1. Cette règle
+# vise SHA-1 comme fonction de hachage et comme fonction de dérivation de mot de
+# passe, où collisions et vitesse comptent. Dans HMAC, l'attaque pertinente est la
+# falsification, et la RFC 4226 §B.2 établit que les collisions de SHA-1 ne s'y
+# transposent pas. Voir docs/TOTP.md et ADR-024.
+sha1 = { workspace = true }
+hmac = { workspace = true }
+getrandom = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+passlock-platform = { workspace = true }
+
+[lints]
+workspace = true

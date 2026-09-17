@@ -1,0 +1,38 @@
+[package]
+name = "passlock-cli"
+description = "Interface en ligne de commande de Passlock (headless)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "passlock"
+path = "src/main.rs"
+
+[dependencies]
+passlock-core = { workspace = true }
+passlock-platform = { workspace = true }
+
+# clap est utilisé via son **API builder**, sans la feature `derive`.
+#
+# Motif : la feature `derive` fait entrer `syn`, `quote` et `proc-macro2` dans
+# l'arbre de dépendances du binaire. Ces crates s'exécutent à la compilation avec
+# les privilèges du build et sont, statistiquement, la partie de l'écosystème la
+# plus exposée aux compromissions de chaîne d'approvisionnement. L'API builder
+# offre exactement la même analyse d'arguments sans cette dépendance.
+#
+# Le cœur cryptographique (`passlock-core`) est de toute façon soumis à une règle
+# plus stricte encore : aucune macro procédurale, y compris pour la sérialisation.
+clap = { version = "4", default-features = false, features = [
+    "std",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
+] }
+zeroize = { workspace = true }
+
+[lints]
+workspace = true

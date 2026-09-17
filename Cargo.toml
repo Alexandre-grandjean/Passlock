@@ -1,0 +1,92 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/passlock-core",
+    "crates/passlock-platform",
+    "crates/passlock-cli",
+]
+# Les cibles de fuzzing forment un espace de travail distinct : elles exigent une
+# toolchain nightly et des drapeaux de compilation que le reste du projet ne doit
+# pas hériter. Le crate `fuzz/` se détache de lui-même, cette exclusion le rend
+# explicite côté projet principal.
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+passlock-core = { path = "crates/passlock-core" }
+passlock-platform = { path = "crates/passlock-platform" }
+
+argon2 = { version = "0.6.0", default-features = false, features = ["zeroize"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "getrandom"] }
+getrandom = "0.4"
+hkdf = "0.13"
+sha2 = "0.11"
+sha1 = "0.11"
+hmac = "0.13"
+zeroize = "1.9"
+subtle = "2.6"
+libc = "0.2"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+strip = "symbols"
+opt-level = 3
+
+[profile.dev]
+panic = "unwind"
+
+[workspace.lints.rust]
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = "warn"
+non_ascii_idents = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# Les lints explicites doivent avoir une priorité STRICTEMENT supérieure à celle du
+# groupe qui les contient, sinon `clippy::lint_groups_priority` refuse la
+# configuration et l'ordre du tableau est ignoré.
+unwrap_used = { level = "deny", priority = 1 }
+expect_used = { level = "deny", priority = 1 }
+
+# --- Lints pedantic écartés, avec justification ---
+#
+# Ce ne sont pas des exceptions de confort : chacun est écarté parce que le lint
+# produit ici un résultat moins bon que le code qu'il propose.
+
+# Le projet documente les conditions d'erreur sous un titre « # Erreurs ». Le lint
+# ne reconnaît que le titre anglais « # Errors ». Traduire le titre dans un code
+# intégralement documenté en français nuirait à la cohérence pour satisfaire un
+# outil.
+missing_errors_doc = "allow"
+
+# `mode & 0o077 == 0` est la formulation lisible pour un masque de permissions.
+# La réécriture proposée (`trailing_zeros() >= 6`) exprime la même chose en termes
+# de nombre de bits, ce qui est nettement moins clair dans un contexte où l'on
+# raisonne sur des droits d'accès.
+verbose_bit_mask = "allow"
+
+# Le projet nomme les modules d'après leur domaine. `kdf::KdfParams` est plus
+# lisible que `kdf::Params` à l'usage, car le nom reste explicite hors contexte.
+module_name_repetitions = "allow"
+
+# La documentation est rédigée en **prose explicative** et non en liste d'API. Des
+# termes comme XChaCha20, Argon2id ou MessagePack y apparaissent comme des mots de
+# la phrase ; les entourer de rétro-accents à chaque occurrence alourdirait la
+# lecture sans rien clarifier. Les identifiants du code, eux, sont déjà marqués
+# quand ils désignent une entité du programme.
+doc_markdown = "allow"
+# La cryptographie ne doit jamais utiliser de comparaison non constante en temps.
+partialeq_ne_impl = "deny"
+float_cmp = "deny"

@@ -1,0 +1,148 @@
+# Intégration continue.
+#
+# Le job `windows` n'est pas décoratif : l'environnement de développement ne
+# dispose pas de cible Windows exécutable, donc **c'est le seul endroit où le
+# backend Windows est réellement compilé, lié et exécuté**. Tant qu'il n'a pas
+# tourné, tout ce qui touche à Windows doit être considéré comme non vérifié.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Une compilation qui échoue consomme du temps d'exécution : on la traite comme
+  # une erreur bloquante, jamais comme un avertissement.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux : la plateforme de référence, avec l'ensemble des contrôles.
+  # ---------------------------------------------------------------------------
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # La version est épinglée par `rust-toolchain.toml`, elle-même référencée
+      # comme source unique de vérité. Ne pas la dupliquer ici.
+      - name: Installer la toolchain
+        run: rustup show
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Formatage
+        run: cargo fmt --all -- --check
+
+      - name: Analyse statique
+        run: cargo clippy --workspace --all-targets
+
+      - name: Tests
+        run: cargo test --workspace
+
+      # Ne doit rien afficher : la propriété est vérifiable, pas déclarative.
+      # Les commentaires sont exclus — `forbid(unsafe_code)` et les explications
+      # contiennent le mot sans être du code.
+      - name: Aucun `unsafe` dans le moteur cryptographique
+        run: |
+          if grep -rn "unsafe" crates/passlock-core/src \
+              | grep -vE "^[^:]+:[0-9]+:\s*(//|///|//!)" \
+              | grep -v "forbid(unsafe_code)"; then
+            echo "::error::Du code unsafe est apparu dans passlock-core"
+            exit 1
+          fi
+
+      - name: Aucune macro procédurale dans le moteur cryptographique
+        run: |
+          if cargo tree -p passlock-core | grep -Ei "proc-macro|syn v|quote|proc-macro2"; then
+            echo "::error::Une macro procédurale est entrée dans l'arbre du cœur"
+            exit 1
+          fi
+
+      - name: Aucune dépendance réseau dans le moteur cryptographique
+        run: |
+          if cargo tree -p passlock-core | grep -Ei "reqwest|hyper|tokio|tls|ureq"; then
+            echo "::error::Une dépendance réseau est entrée dans l'arbre du cœur"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Windows : seule vérification réelle de ce backend.
+  # ---------------------------------------------------------------------------
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer la toolchain
+        run: rustup show
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-${{ hashFiles('**/Cargo.lock') }}
+
+      # `cargo test` compile **et** exécute : c'est la seule étape qui prouve que le
+      # backend fonctionne, et pas seulement qu'il compile.
+      - name: Analyse statique
+        run: cargo clippy --workspace --all-targets
+
+      - name: Tests
+        run: cargo test --workspace
+
+  # ---------------------------------------------------------------------------
+  # Audit des dépendances.
+  # ---------------------------------------------------------------------------
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  # ---------------------------------------------------------------------------
+  # Fuzzing guidé par la couverture.
+  #
+  # Il exige une toolchain nightly et ne peut pas tourner dans l'environnement de
+  # développement. Les durées sont volontairement courtes : l'objectif est de
+  # détecter une régression introduite par un changement, pas de mener une campagne
+  # longue, qui relève d'une exécution dédiée.
+  # ---------------------------------------------------------------------------
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer la toolchain nightly
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Installer cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzzer l'analyse du conteneur
+        run: cargo +nightly fuzz run vault_parse -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz
+
+      - name: Fuzzer le décodage du header
+        run: cargo +nightly fuzz run header_decode -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz
+
+      - name: Fuzzer le décodage de l'enveloppe
+        run: cargo +nightly fuzz run payload_decode -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz

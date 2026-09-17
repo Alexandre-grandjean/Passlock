@@ -7,15 +7,15 @@ mécanisme de récupération à distance, aucune télémétrie, aucune synchroni
 propriétaire — et ces absences sont des choix de conception, pas des
 fonctionnalités manquantes.
 
-> **Statut : phases 0 à 3 terminées et approuvées. La phase 4 n'a pas commencé.**
+> **Statut : phases 0 à 3 terminées et approuvées. Phase 4 en cours — étape 1 sur 5 close.**
 >
 > Existent et sont testés : le moteur cryptographique et le format de coffre
 > (phase 1), le cœur de stockage — modèle de données, archive, migration, recherche,
-> historique, corbeille (phase 2), et le générateur de secrets avec le TOTP
-> (phase 3).
+> historique, corbeille (phase 2), le générateur de secrets avec le TOTP (phase 3),
+> et la **récupération** — clé de récupération et fichier-clé (phase 4, étape 1 sur 5).
 >
-> N'existent **pas encore** : pièces jointes, sauvegardes, test de restauration, clé
-> de récupération, import/export et presse-papiers *(phase 4)* ; centre de sécurité et
+> N'existent **pas encore** : pièces jointes, sauvegardes, test de restauration,
+> import/export et presse-papiers *(phase 4, étapes 2 à 5)* ; centre de sécurité et
 > analyse d'URL *(phase 5)* ; interface graphique *(phase 6)* ; audit externe, SBOM et
 > build reproductible *(phase 7)*.
 >
@@ -43,6 +43,11 @@ fonctionnalités manquantes.
 * **Engendrer des secrets arbitraires** (hex, Base32, Base64url, alphanumérique).
 * **Produire des codes TOTP**, et écrire un secret engendré directement dans le
   coffre sans jamais le faire transiter par la ligne de commande.
+* **Ajouter une clé de récupération** de 256 bits, en Base32 Crockford avec total de
+  contrôle, et ouvrir le coffre avec elle.
+* **Ajouter un fichier-clé** sur support amovible, et ouvrir le coffre avec lui.
+* **Vérifier qu'une clé de récupération ouvre réellement le coffre** — une clé jamais
+  essayée n'est pas une récupération.
 
 ## Ce que ce logiciel ne fait pas — et ne fera pas
 
@@ -154,6 +159,48 @@ passlock totp ~/coffre.plk --list
 **Aucun code n'est produisible sans déverrouillage du coffre**, et aucun n'est mis en
 cache. Voir [`docs/TOTP.md`](docs/TOTP.md) pour le modèle complet et ses limites.
 
+### Récupération
+
+Un coffre peut porter jusqu'à trois chemins d'ouverture : le mot de passe maître, une
+**clé de récupération** transcrite, et un **fichier-clé** sur support amovible. Les trois
+produisent la clé de chiffrement par le **même chemin** — il n'y a donc pas de chemin
+plus faible que les autres.
+
+```sh
+# Créer une clé de récupération : elle est affichée UNE FOIS, sur stdout
+passlock recovery new ~/coffre.plk
+
+# L'essayer pour de bon — une clé jamais essayée n'est pas une récupération
+passlock recovery test ~/coffre.plk
+
+# Ouvrir n'importe quelle commande avec cette clé
+printf '%s\n' "$CLE" | passlock --recovery-key-stdin entry list ~/coffre.plk
+
+# Fichier-clé : 32 octets aléatoires, écrits là où vous le demandez
+passlock keyfile new ~/coffre.plk --key-file /media/cle/coffre.key
+passlock keyfile test ~/coffre.plk --key-file /media/cle/coffre.key
+```
+
+La clé de récupération est en Base32 Crockford, groupée par blocs de cinq, avec un
+**total de contrôle de 40 bits** : une faute de recopie est refusée avant toute tentative
+de déverrouillage, et non après.
+
+**Trois choses à savoir, et elles ne sont pas des précautions de style :**
+
+* **chaque slot est un chemin d'entrée de plus.** Récupérabilité et résistance au vol
+  varient en sens inverse : ce que vous gagnez contre la perte, vous le cédez contre le
+  vol ;
+* **un fichier-clé est un fichier : il se copie.** Ce n'est **pas** un jeton matériel
+  inviolable. Rangez-le sur un support **physiquement distinct** du coffre et des
+  sauvegardes, et retirez-le après usage. Un vrai facteur matériel (FIDO2) est repoussé,
+  et cette absence est documentée plutôt que tue — voir `ADR-032` ;
+* **ajouter un slot ré-écrit le payload** au prochain enregistrement : le header entre
+  dans l'AAD du contenu, donc son tag doit être recalculé. Ce n'est pas instantané, et le
+  contraire a été affirmé à tort dans une version antérieure de `SECURITY.md`.
+
+Aucun secret n'est accepté en argument de commande : la clé vient d'une invite masquée ou
+de l'entrée standard, jamais de `argv`, où `ps` la montrerait.
+
 ### Utilisation scriptée
 
 Par défaut le mot de passe est lu de façon interactive, avec l'écho désactivé.
@@ -172,8 +219,10 @@ ligne de commande.** Un tel argument serait visible dans la liste des processus
 | Option | Effet |
 |---|---|
 | `--read-only` | Ouvre sans autoriser aucune écriture : rien n'est modifié, même en cas d'erreur |
-| `--password-stdin` | Lit les mots de passe sur l'entrée standard |
+| `--password-stdin` | Lit les invites (mot de passe, clé de récupération) sur l'entrée standard |
 | `--state-dir <RÉPERTOIRE>` | Emplacement de la sentinelle anti-retour-en-arrière |
+| `--recovery-key-stdin` | Ouvre le coffre avec une clé de récupération lue sur l'entrée standard |
+| `--key-file <CHEMIN>` | Ouvre le coffre avec le fichier-clé situé à ce chemin |
 
 ## Format du coffre
 
@@ -197,6 +246,7 @@ techniquement ni juridiquement.
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | Journal des décisions, **y compris celles qui ont été annulées** |
 | [`docs/TOTP.md`](docs/TOTP.md) | Modèle TOTP : ce qui est supporté, pourquoi SHA-1 est légitime, **l'horloge n'est pas vérifiée**, injection termininale, ce qui n'est pas revendiqué |
 | [`crates/passlock-core/data/wordlists/ATTRIBUTION.md`](crates/passlock-core/data/wordlists/ATTRIBUTION.md) | Provenance, licence et empreinte des deux listes de mots embarquées |
+| [`docs/AUDIT_PHASE4_1_RECUPERATION.md`](docs/AUDIT_PHASE4_1_RECUPERATION.md) | **Audit de la phase 4, étape 1** : clé de récupération, fichier-clé, création exclusive et durabilité, défaut de perte de données trouvé |
 | [`docs/AUDIT_PHASE3.md`](docs/AUDIT_PHASE3.md) | Audit adversarial du générateur et du TOTP : 35 vecteurs RFC, fuzzing, secret en mémoire, défauts trouvés |
 | [`docs/AUDIT_PHASE2_SEMANTIQUE.md`](docs/AUDIT_PHASE2_SEMANTIQUE.md) | **Audit sémantique** du magasin par modèle de référence : 9 500 opérations comparées, 18 invariants |
 | [`docs/AUDIT_PHASE2.md`](docs/AUDIT_PHASE2.md) | Audit adversarial du cœur de stockage |
@@ -207,7 +257,7 @@ techniquement ni juridiquement.
 Les affirmations de sécurité de ce projet sont vérifiables :
 
 ```sh
-cargo test --workspace          # 348 tests, dont 27 attaques adversariales et 9 500
+cargo test --workspace          # 528 tests, dont 27 attaques adversariales et 9 500
                                 # opérations comparées à un modèle de référence
 cargo deny check                # avis de sécurité, licences, bans, sources
 
@@ -222,6 +272,26 @@ stat -c '%a %n' ~/coffre.plk
 
 # Latence de déverrouillage réellement mesurée
 passlock calibrate --budget 5
+
+# Le TOTP de bout en bout, contre un vecteur officiel de la RFC 6238
+printf '%s\nGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\n' "$MOT_DE_PASSE" \
+  | passlock entry totp set COFFRE "$ID" --password-stdin --digits 8
+MOT_DE_PASSE="$MOT_DE_PASSE" passlock totp COFFRE "$ID" --at 59   # → 94287082
+
+# La récupération, de bout en bout : la clé ouvre VRAIMENT le coffre
+passlock recovery new COFFRE > cle.txt   # affichée une seule fois, sur stdout
+passlock recovery test COFFRE < cle.txt  # le slot est désenroulé, le contenu déchiffré
+printf '%s\n' "$CLE" | passlock --recovery-key-stdin entry list COFFRE
+
+# Une clé mal recopiée est refusée par son total de contrôle, AVANT toute dérivation
+passlock recovery test COFFRE < cle-fausse.txt   # → « total de contrôle … invalide »
+
+# Le fichier-clé est en 0600 et n'est jamais écrit par-dessus un existant
+passlock keyfile new COFFRE --key-file /media/cle/coffre.key
+stat -c '%a %n' /media/cle/coffre.key            # 600
+
+# Le fuzzing, cible par cible (nightly requis)
+cd fuzz && cargo +nightly fuzz run parse_recovery_key -- -max_total_time=60
 ```
 
 ## État de vérification
@@ -237,6 +307,12 @@ trouvé, et ce qui reste **non vérifié**.
 * **Phase 2** — [`docs/AUDIT_PHASE2.md`](docs/AUDIT_PHASE2.md) et
   [`docs/AUDIT_PHASE2_SEMANTIQUE.md`](docs/AUDIT_PHASE2_SEMANTIQUE.md).
 * **Phase 3** — [`docs/AUDIT_PHASE3.md`](docs/AUDIT_PHASE3.md).
+* **Phase 4, étape 1 — récupération** —
+  [`docs/AUDIT_PHASE4_1_RECUPERATION.md`](docs/AUDIT_PHASE4_1_RECUPERATION.md) :
+  **un défaut de gravité élevée**, trouvé par un test. Le nettoyage d'un fichier-clé
+  détruisait le fichier **préexistant** de l'utilisateur au moment même où il refusait
+  de l'écraser — un refus qui devenait une perte définitive. Corrigé, et le chemin de
+  suppression rendu inatteignable quand rien n'a été créé.
 
 ### La conformité TOTP ne vient pas de nous
 

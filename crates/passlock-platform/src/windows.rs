@@ -1,12 +1,25 @@
-//! Backend Windows pour le verrouillage mémoire.
+//! Backend Windows pour le verrouillage mémoire et les fichiers.
 //!
 //! # Statut de vérification — À LIRE
 //!
-//! Ce fichier **n'a pas pu être compilé ni testé** dans l'environnement de
-//! développement actuel (WSL2, cible `x86_64-unknown-linux-gnu` uniquement, aucune
-//! cible Windows installée). Il est écrit d'après la documentation Microsoft et
-//! doit être considéré comme **non vérifié** jusqu'à ce qu'un job de CI sur
-//! `x86_64-pc-windows-msvc` le compile et l'exécute.
+//! **NOTE DE CORRECTION.** Ce commentaire affirmait que le fichier « n'a pas pu
+//! être compilé ». **C'était faux depuis l'installation de la cible
+//! `x86_64-pc-windows-msvc`** : `cargo check --target x86_64-pc-windows-msvc
+//! --workspace --all-targets` passe, et cette compilation a d'ailleurs révélé deux
+//! erreurs réelles en leur temps (un import `io` dupliqué, une implémentation de
+//! `Debug` référençant un champ renommé).
+//!
+//! La distinction exacte, et c'est elle qui compte :
+//!
+//! * **compilation VÉRIFIÉE** — les signatures FFI et les types sont validés par le
+//!   compilateur, y compris pour les tests ;
+//! * **exécution NON OBSERVÉE** — aucun binaire Windows n'a été lié ni lancé : ni
+//!   Wine, ni MinGW, ni linker MSVC dans l'environnement. Le comportement à
+//!   l'exécution (ACL, déplacement atomique, verrou, `VirtualLock`, **durabilité**)
+//!   reste **entièrement non vérifié**.
+//!
+//! Aucune affirmation d'ordre fonctionnel ne doit donc être faite sur ce fichier.
+//! Voir `SECURITY.md` §4.3 et 4.4, et les limites L2, L9.
 //!
 //! Les API sont référencées par leur chemin complet afin qu'une erreur se
 //! manifeste à la **compilation** et non par un comportement silencieusement
@@ -102,10 +115,19 @@ pub(crate) fn restrict_ptrace() -> crate::process::HardeningOutcome {
 // ---------------------------------------------------------------------------
 // Écriture atomique, verrouillage et permissions.
 //
-// ATTENTION : la surface FFI ci-dessous est volontairement réduite à deux appels
-// (`MoveFileExW` et `LockFileEx`) précisément parce qu'elle ne peut pas être
-// compilée dans l'environnement de développement actuel. Moins de code non
-// vérifié signifie moins de risque d'y introduire une erreur silencieuse.
+// NOTE DE CORRECTION. Ce commentaire justifiait une surface FFI réduite à deux
+// appels (`MoveFileExW`, `LockFileEx`) par le fait que le fichier « ne peut pas
+// être compilé dans l'environnement de développement ». La cible Windows est
+// désormais installée et le fichier compile : cette justification n'a plus lieu
+// d'être, mais la réduction de surface reste un principe.
+//
+// La phase 4 ajoute délibérément une surface FFI plus large (création exclusive,
+// DACL, énumération, suppression). C'est un coût assumé : sans DACL explicite, les
+// fichiers sensibles neufs — clé de récupération, export en clair, sauvegarde,
+// blobs, temporaires — reposeraient sur les ACL héritées du profil, c'est-à-dire
+// sur une garantie qui disparaît dès que le fichier est créé hors du profil
+// (dossier partagé, racine d'un disque). Une surface plus large mais **compilée**
+// est préférable à une garantie silencieusement absente.
 // ---------------------------------------------------------------------------
 
 use std::fs::{File, OpenOptions};
@@ -234,6 +256,442 @@ pub fn write_atomic(target: &Path, temp_suffix: &str, data: &[u8]) -> io::Result
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Création, lecture, suppression et durabilité — phase 4.
+//
+// NON VÉRIFIÉ À L'EXÉCUTION. Ce bloc est compilé par
+// `cargo check --target x86_64-pc-windows-msvc` (signatures et types validés par
+// le compilateur) mais n'a **jamais tourné** : aucun binaire Windows n'est lié ni
+// lancé dans l'environnement de développement. Voir SECURITY.md, limites L2 et L9.
+//
+// Différence structurelle avec Unix, qui gouverne tout ce bloc : Windows n'a pas
+// de famille `*at`. On ne peut donc pas tenir un descripteur de répertoire et
+// opérer relativement à lui. Chaque chemin est vérifié **avant** l'opération, ce
+// qui laisse une fenêtre de course — la protection **n'est pas équivalente** à
+// celle d'Unix, et n'est pas présentée comme telle.
+// ---------------------------------------------------------------------------
+
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::FromRawHandle;
+
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    INVALID_HANDLE_VALUE, LocalFree,
+};
+use windows_sys::Win32::Security::Authorization::{
+    EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, SetEntriesInAclW, TRUSTEE_IS_SID,
+    TRUSTEE_IS_USER, TRUSTEE_W,
+};
+use windows_sys::Win32::Security::{
+    ACL, GetTokenInformation, InitializeSecurityDescriptor, NO_INHERITANCE, SE_DACL_PROTECTED,
+    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+    SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    CREATE_NEW, CreateDirectoryW, CreateFileW, DeleteFileW, FILE_ATTRIBUTE_NORMAL,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FindClose, FindFirstFileW, FindNextFileW,
+    GetFileAttributesW, INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, RemoveDirectoryW, WIN32_FIND_DATAW,
+};
+use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+use crate::fs::Durability;
+
+/// Ferme un descripteur de jeton à la destruction.
+struct TokenHandle(HANDLE);
+
+impl Drop for TokenHandle {
+    fn drop(&mut self) {
+        // SAFETY: le descripteur provient de `OpenProcessToken` et n'est fermé
+        // qu'ici. Un échec de `CloseHandle` n'a pas de remède utile.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Descripteur de sécurité privé : une seule ACE, pour l'utilisateur courant.
+///
+/// La DACL est **protégée** (`SE_DACL_PROTECTED`) : aucune ACE héritée du
+/// répertoire parent n'y est ajoutée. C'est ce qui rend la restriction
+/// indépendante de l'endroit où le fichier est créé — un répertoire partagé ou la
+/// racine d'un disque n'élargissent pas les droits.
+struct PrivateSecurity {
+    descriptor: Box<SECURITY_DESCRIPTOR>,
+    acl: *mut ACL,
+}
+
+impl Drop for PrivateSecurity {
+    fn drop(&mut self) {
+        // SAFETY: l'ACL vient de `SetEntriesInAclW`, qui l'alloue par le
+        // allocateur local ; `LocalFree` est la libération documentée. Le
+        // descripteur, lui, est possédé par le `Box` et libéré automatiquement.
+        unsafe {
+            if !self.acl.is_null() {
+                LocalFree(self.acl.cast());
+            }
+        }
+    }
+}
+
+impl PrivateSecurity {
+    /// Attributs à passer aux appels de création.
+    fn attributes(&mut self) -> SECURITY_ATTRIBUTES {
+        SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0),
+            lpSecurityDescriptor: (&raw mut *self.descriptor).cast(),
+            bInheritHandle: 0,
+        }
+    }
+}
+
+/// Construit une DACL n'accordant le contrôle total qu'à l'utilisateur courant.
+///
+/// # Séquence
+/// jeton du processus → SID de l'utilisateur → `EXPLICIT_ACCESS_W` (une ACE,
+/// `GENERIC_ALL`, `SET_ACCESS`, sans héritage) → `SetEntriesInAclW` → descripteur
+/// de sécurité → DACL protégée.
+///
+/// # Pourquoi une DACL explicite plutôt que les ACL héritées
+/// Les ACL héritées du profil utilisateur sont correctes dans le cas nominal et
+/// **fausses** dès que le fichier est créé ailleurs (dossier partagé, racine d'un
+/// disque). Poser la DACL nous-mêmes rend la restriction indépendante de
+/// l'emplacement.
+///
+/// # Échec fermé
+/// Toute étape en échec fait échouer l'appel : on préfère **ne pas créer** le
+/// fichier plutôt que de le créer avec des droits plus larges que voulu.
+fn private_security() -> io::Result<PrivateSecurity> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: `token` est une variable vivante et inscriptible.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let token = TokenHandle(token);
+
+    // Premier appel : la taille nécessaire. L'échec est attendu, c'est `needed` qui
+    // porte l'information.
+    let mut needed: u32 = 0;
+    // SAFETY: le tampon nul est explicitement autorisé pour interroger la taille.
+    unsafe {
+        GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &raw mut needed);
+    }
+    if needed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Tampon aligné sur `usize` : `TOKEN_USER` contient des pointeurs, et un
+    // `Vec<u8>` (alignement 1) rendrait la relecture indéfinie.
+    let words = usize::try_from(needed)
+        .unwrap_or(0)
+        .div_ceil(size_of::<usize>().max(1));
+    let mut buffer: Vec<usize> = vec![0; words];
+    // SAFETY: le tampon est au moins aussi grand que `needed` octets et
+    // correctement aligné.
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &raw mut needed,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: le tampon contient un `TOKEN_USER` écrit par le noyau, et il reste
+    // vivant jusqu'à la fin de la fonction — donc pendant tout usage du SID.
+    let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+
+    let access = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: GENERIC_ALL,
+        grfAccessMode: SET_ACCESS,
+        grfInheritance: NO_INHERITANCE,
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: sid.cast(),
+        },
+    };
+
+    let mut acl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: `access` décrit une ACE valide et vivante ; `acl` est inscriptible.
+    // L'absence d'ACL d'entrée est signalée par un pointeur nul.
+    if unsafe { SetEntriesInAclW(1, &raw const access, std::ptr::null(), &raw mut acl) }
+        != ERROR_SUCCESS
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: `SECURITY_DESCRIPTOR` est une structure de pointeurs et d'entiers ;
+    // la valeur nulle est un état de départ valide avant `Initialize`.
+    let mut descriptor = Box::new(unsafe { std::mem::zeroed::<SECURITY_DESCRIPTOR>() });
+
+    // SAFETY: `descriptor` est alloué sur le tas et correctement aligné.
+    if unsafe {
+        InitializeSecurityDescriptor((&raw mut *descriptor).cast(), SECURITY_DESCRIPTOR_REVISION)
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // `1` = la DACL est présente, `0` = elle n'est pas héritée par défaut.
+    // SAFETY: le descripteur vient d'être initialisé, l'ACL est valide.
+    if unsafe { SetSecurityDescriptorDacl((&raw mut *descriptor).cast(), 1, acl, 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Sans cette ligne, le noyau fusionnerait la DACL avec les ACE héritées du
+    // parent : la restriction dépendrait alors de l'emplacement du fichier.
+    // SAFETY: le descripteur est initialisé et la DACL a été posée.
+    if unsafe {
+        SetSecurityDescriptorControl(
+            (&raw mut *descriptor).cast(),
+            SE_DACL_PROTECTED,
+            SE_DACL_PROTECTED,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(PrivateSecurity { descriptor, acl })
+}
+
+/// Crée un fichier **neuf**, avec une DACL restrictive, sans jamais écraser.
+///
+/// `CREATE_NEW` joue le rôle de `O_CREAT|O_EXCL` : le contrôle d'existence et la
+/// création sont **un seul appel**, donc sans fenêtre entre les deux.
+///
+/// # Non vérifié
+/// La DACL est posée par `SECURITY_ATTRIBUTES` **dans l'appel de création**, ce qui
+/// évite toute fenêtre où le fichier existerait avec les droits hérités. **Le
+/// comportement à l'exécution n'a jamais été observé.**
+pub fn create_private_file(target: &Path) -> io::Result<File> {
+    let (dir, _name) = split_target(target)?;
+    crate::fs::ensure_no_symlink_components(&dir)?;
+
+    let mut security = private_security()?;
+    let attributes = security.attributes();
+    let wide = to_wide(target)?;
+
+    // SAFETY: `wide` est une chaîne UTF-16 terminée par un nul et vivante ;
+    // `attributes` référence un descripteur vivant jusqu'à la fin de l'appel.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ,
+            &raw const attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `handle` est un descripteur valide dont la propriété est transférée.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+/// Crée un répertoire privé, avec une DACL restrictive.
+///
+/// Rend [`Durability::FileOnly`] : Windows n'offre pas, via cette API, la
+/// synchronisation de l'entrée de répertoire parente qui rendrait le nom durable
+/// sur Unix.
+pub fn create_dir_private(target: &Path) -> io::Result<Durability> {
+    let (dir, _name) = split_target(target)?;
+    crate::fs::ensure_no_symlink_components(&dir)?;
+
+    let mut security = private_security()?;
+    let attributes = security.attributes();
+    let wide = to_wide(target)?;
+
+    // SAFETY: `wide` est valide et vivante ; `attributes` référence un descripteur
+    // vivant. `CreateDirectoryW` échoue si l'entrée existe déjà.
+    if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Durability::FileOnly)
+}
+
+/// Supprime un fichier. Échoue sur un répertoire, ce qui est voulu.
+pub fn remove_file(target: &Path) -> io::Result<()> {
+    let (dir, _name) = split_target(target)?;
+    crate::fs::ensure_no_symlink_components(&dir)?;
+    let wide = to_wide(target)?;
+    // SAFETY: `wide` est une chaîne UTF-16 valide et vivante.
+    if unsafe { DeleteFileW(wide.as_ptr()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Supprime un répertoire **vide**. Échoue s'il contient encore quelque chose.
+pub fn remove_dir(target: &Path) -> io::Result<()> {
+    let (dir, _name) = split_target(target)?;
+    crate::fs::ensure_no_symlink_components(&dir)?;
+    let wide = to_wide(target)?;
+    // SAFETY: `wide` est une chaîne UTF-16 valide et vivante.
+    if unsafe { RemoveDirectoryW(wide.as_ptr()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Extrait le nom d'un `cFileName` terminé par un nul.
+fn find_data_name(data: &WIN32_FIND_DATAW) -> std::ffi::OsString {
+    let end = data
+        .cFileName
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(data.cFileName.len());
+    std::ffi::OsString::from_wide(&data.cFileName[..end])
+}
+
+/// Liste les noms des entrées d'un répertoire.
+///
+/// # Limites assumées, propres à Windows
+/// * le chemin est vérifié **avant** l'énumération, sans descripteur tenu : la
+///   fenêtre de course habituelle de cette plateforme s'applique ;
+/// * le motif de recherche est construit par concaténation, donc un nom de
+///   répertoire contenant `*` ou `?` élargit la recherche. C'est sans danger ici :
+///   l'appelant ne retient que les noms ayant exactement la forme d'un nom de blob.
+pub fn list_dir(target: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    crate::fs::ensure_no_symlink_components(target)?;
+
+    let mut pattern = target.to_path_buf();
+    pattern.push("*");
+    let wide = to_wide(&pattern)?;
+
+    // SAFETY: `WIN32_FIND_DATAW` est une structure de POD ; la valeur nulle est un
+    // état de départ valide.
+    let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+    // SAFETY: `wide` est valide et vivante ; `data` est vivant et inscriptible.
+    let handle = unsafe { FindFirstFileW(wide.as_ptr(), &raw mut data) };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut names = Vec::new();
+    loop {
+        let name = find_data_name(&data);
+        if name != "." && name != ".." {
+            names.push(name);
+        }
+        // SAFETY: `handle` provient de `FindFirstFileW` et `data` est inscriptible.
+        if unsafe { FindNextFileW(handle, &raw mut data) } == 0 {
+            break;
+        }
+    }
+    // SAFETY: `handle` provient de `FindFirstFileW` et n'est plus utilisé ensuite.
+    unsafe { FindClose(handle) };
+
+    Ok(names)
+}
+
+/// Ouvre un fichier ordinaire en lecture seule.
+///
+/// `FILE_FLAG_OPEN_REPARSE_POINT` empêche de suivre un lien au **dernier**
+/// composant — les composants intermédiaires, eux, ne sont couverts que par la
+/// vérification préalable.
+pub fn open_read(target: &Path) -> io::Result<File> {
+    let (dir, _name) = split_target(target)?;
+    crate::fs::ensure_no_symlink_components(&dir)?;
+    let wide = to_wide(target)?;
+
+    // SAFETY: `wide` est valide et vivante ; aucun attribut de sécurité n'est
+    // demandé pour une ouverture en lecture.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `handle` est un descripteur valide dont la propriété est transférée.
+    let file = unsafe { File::from_raw_handle(handle) };
+
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "la cible n'est pas un fichier ordinaire",
+        ));
+    }
+    Ok(file)
+}
+
+/// Lit un fichier entier, en refusant de dépasser `max_len` octets.
+///
+/// La borne est appliquée **pendant** la lecture, jamais déduite d'une taille
+/// annoncée par le fichier.
+pub fn read_file(target: &Path, max_len: usize) -> io::Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    let mut file = open_read(target)?;
+    let limit = u64::try_from(max_len).unwrap_or(u64::MAX).saturating_add(1);
+    let mut buffer = Vec::new();
+    let mut limited = (&mut file).take(limit);
+    limited.read_to_end(&mut buffer)?;
+
+    if buffer.len() > max_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("le fichier dépasse la taille maximale de {max_len} octets"),
+        ));
+    }
+    Ok(buffer)
+}
+
+/// Vrai si l'entrée existe.
+///
+/// # Usage
+/// Énumération et rapport uniquement — jamais comme garde avant une création.
+#[must_use]
+pub fn path_exists(target: &Path) -> bool {
+    let Ok(wide) = to_wide(target) else {
+        return false;
+    };
+    // SAFETY: `wide` est une chaîne UTF-16 valide et vivante.
+    unsafe { GetFileAttributesW(wide.as_ptr()) != INVALID_FILE_ATTRIBUTES }
+}
+
+/// Rend durable le contenu du fichier — et **seulement** son contenu.
+///
+/// Rend toujours [`Durability::FileOnly`] : il n'existe pas, sous cette forme, de
+/// synchronisation de l'entrée de répertoire parente. La persistance du **nom**
+/// n'est donc pas revendiquée, et le niveau réduit est rapporté à l'utilisateur
+/// plutôt que dissimulé.
+///
+/// L'absence de cette capacité **n'est pas une erreur** : le fichier est
+/// parfaitement utilisable, seule une coupure de courant peut faire disparaître son
+/// nom — ce que `attach verify` détecte.
+pub fn make_durable(file: &File, _dir: &Path) -> io::Result<Durability> {
+    // `sync_all` est `FlushFileBuffers` sur le descripteur.
+    file.sync_all()?;
+    Ok(Durability::FileOnly)
+}
+
+/// Sous Windows, la persistance du **nom** dans le répertoire n'est pas revendiquée.
+///
+/// `FlushFileBuffers` sur un descripteur de répertoire exige
+/// `FILE_FLAG_BACKUP_SEMANTICS`, et NTFS n'offre pas la même sémantique
+/// d'ordonnancement que `fsync` sur un répertoire. Le niveau réduit est **rendu**, et
+/// rapporté à l'utilisateur à l'ouverture du coffre.
+///
+/// **NON VÉRIFIÉ À L'EXÉCUTION.**
+pub(crate) const fn platform_durability() -> Durability {
+    Durability::FileOnly
 }
 
 /// Verrou exclusif sur un coffre.

@@ -41,7 +41,7 @@ use crate::model::{
     MAX_FOLDER_DEPTH, MAX_NAME_LEN, Revision, Tag, TagId,
 };
 use crate::rollback::now_unix;
-use crate::vault::{Diagnostics, Vault, VaultConfig};
+use crate::vault::{Credentials, Diagnostics, Vault, VaultConfig};
 
 /// Un coffre ouvert, avec son modèle de données.
 pub struct VaultStore {
@@ -75,7 +75,19 @@ impl VaultStore {
         Ok(store)
     }
 
-    /// Ouvre un coffre existant et décode son modèle.
+    /// Ouvre un coffre existant avec son mot de passe maître.
+    ///
+    /// Raccourci du cas courant : délègue à [`VaultStore::open_with`]. Les clés de
+    /// récupération et les fichiers-clés passent par `open_with` directement.
+    ///
+    /// # Erreurs
+    /// Voir [`VaultStore::open_with`].
+    pub fn open(path: &std::path::Path, password: &[u8], config: &VaultConfig) -> Result<Self> {
+        Self::open_with(path, &Credentials::Password(password), config)
+    }
+
+    /// Ouvre un coffre existant avec un matériel d'ouverture quelconque, et décode
+    /// son modèle.
     ///
     /// # Migration
     ///
@@ -84,10 +96,21 @@ impl VaultStore {
     /// prochain enregistrement. Rien n'est écrit ici — une ouverture en lecture seule
     /// ne doit rien modifier.
     ///
+    /// # Un seul chemin
+    ///
+    /// Le matériel d'ouverture ne change **rien** à ce qui suit : décodage, migration
+    /// et diagnostics sont identiques quel que soit le slot utilisé. C'est ce qui
+    /// garantit qu'un coffre ouvert par une clé de récupération se comporte comme un
+    /// coffre ouvert par mot de passe.
+    ///
     /// # Erreurs
-    /// Voir [`Vault::open`], plus les erreurs de décodage du corps.
-    pub fn open(path: &std::path::Path, password: &[u8], config: &VaultConfig) -> Result<Self> {
-        let mut vault = Vault::open(path, password, config)?;
+    /// Voir [`Vault::open_with`], plus les erreurs de décodage du corps.
+    pub fn open_with(
+        path: &std::path::Path,
+        credentials: &Credentials<'_>,
+        config: &VaultConfig,
+    ) -> Result<Self> {
+        let mut vault = Vault::open_with(path, credentials, config)?;
 
         // Le corps est **déplacé** : le coffre n'en conserve aucune copie, et le
         // `Zeroizing` efface le buffer dès qu'il n'est plus utile.

@@ -52,3 +52,10 @@ path = "fuzz_targets/decode_base32.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parse_recovery_key"
+path = "fuzz_targets/parse_recovery_key.rs"
+test = false
+doc = false
+bench = false

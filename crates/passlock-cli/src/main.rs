@@ -26,6 +26,7 @@
 //!   et il ne faut pas en ajouter.
 
 mod generate;
+mod recovery;
 mod totp;
 
 use std::io::{self, Read as _, Write};
@@ -40,9 +41,10 @@ use passlock_core::kdf::{self, KdfParams};
 use passlock_core::memory::lock_status_warning;
 use passlock_core::model::{Entry, EntryId, EntryKind, Field, FieldKind};
 use passlock_core::query::{SearchQuery, SortOrder, search};
+use passlock_core::recovery::{RECOVERY_KEY_LEN, RecoveryKey};
 use passlock_core::secret::SecretVec;
 use passlock_core::store::VaultStore;
-use passlock_core::vault::{Vault, VaultConfig};
+use passlock_core::vault::{Credentials, Vault, VaultConfig};
 
 use passlock_platform::tty::EchoGuard;
 use zeroize::Zeroize;
@@ -84,13 +86,115 @@ impl From<io::Error> for CliError {
 
 pub(crate) type CliResult = Result<(), CliError>;
 
+/// Quel matériel d'ouverture présenter au coffre.
+///
+/// Le défaut est le mot de passe maître. Les deux autres modes sont **globaux** :
+/// une fois choisis, ils valent pour toutes les commandes qui ouvrent le coffre, sans
+/// qu'aucune n'ait à les connaître.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UnlockMode {
+    /// Mot de passe maître — le défaut.
+    Password,
+    /// Clé de récupération transcrite.
+    ///
+    /// `from_stdin` distingue l'usage scripté (`--recovery-key-stdin`) de l'invite
+    /// masquée. Une clé de récupération est un secret : elle n'est **jamais** acceptée
+    /// en argument de commande, où `ps` la montrerait.
+    RecoveryKey {
+        /// Lit la clé sur l'entrée standard plutôt que de la demander.
+        from_stdin: bool,
+    },
+    /// Fichier-clé, lu depuis ce chemin.
+    KeyFile(PathBuf),
+}
+
 /// Paramètres communs extraits de la ligne de commande.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct GlobalOptions {
-    /// Lit les mots de passe sur l'entrée standard plutôt que de les demander.
+    /// Lit les invites (mot de passe, clé de récupération) sur l'entrée standard.
     pub(crate) password_stdin: bool,
     /// Mesures de durcissement du processus, à signaler si elles sont incomplètes.
     pub(crate) hardening: passlock_platform::process::ProcessHardening,
+    /// Matériel d'ouverture à présenter au coffre.
+    pub(crate) unlock: UnlockMode,
+}
+
+/// Matériel d'ouverture **détenu**, à partir duquel des [`Credentials`] sont empruntés.
+///
+/// `Credentials` emprunte le secret plutôt que d'en produire une copie : il faut donc
+/// que quelqu'un le possède pendant toute la durée de l'ouverture. C'est ce type, et
+/// il détruit son contenu en sortant de portée.
+pub(crate) enum UnlockMaterial {
+    Password(SecretVec),
+    Recovery(RecoveryKey),
+    KeyFile(SecretVec),
+}
+
+impl UnlockMaterial {
+    /// Vue empruntée, présentée au coffre.
+    pub(crate) fn credentials(&self) -> Credentials<'_> {
+        match self {
+            Self::Password(secret) => Credentials::Password(secret.expose()),
+            Self::Recovery(key) => Credentials::RecoveryKey(key),
+            Self::KeyFile(secret) => Credentials::KeyFile(secret.expose()),
+        }
+    }
+}
+
+/// Détermine le mode d'ouverture à partir des options globales.
+///
+/// L'exclusion mutuelle est posée dans la définition de la ligne de commande
+/// (`conflicts_with`), donc les deux drapeaux ne peuvent pas être présents ensemble.
+pub(crate) fn unlock_mode_from(matches: &clap::ArgMatches) -> UnlockMode {
+    if matches.get_flag("recovery-key-stdin") {
+        UnlockMode::RecoveryKey { from_stdin: true }
+    } else if let Some(path) = matches.get_one::<String>("key-file") {
+        UnlockMode::KeyFile(PathBuf::from(path))
+    } else {
+        UnlockMode::Password
+    }
+}
+
+/// Lit le matériel d'ouverture demandé par les options globales.
+///
+/// # Aucun secret en argument
+///
+/// Un mot de passe et une clé de récupération sont lus par une invite sans écho, ou
+/// sur l'entrée standard. Un **fichier-clé** est lu depuis son chemin — ce qui est
+/// légitime, puisqu'un chemin n'est pas un secret.
+pub(crate) fn read_unlock_material(options: &GlobalOptions) -> Result<UnlockMaterial, CliError> {
+    match &options.unlock {
+        UnlockMode::Password => Ok(UnlockMaterial::Password(read_password(
+            "Mot de passe maître : ",
+            options.password_stdin,
+        )?)),
+
+        UnlockMode::RecoveryKey { from_stdin } => {
+            let line = read_password("Clé de récupération : ", *from_stdin)?;
+            let text = std::str::from_utf8(line.expose()).map_err(|_| {
+                CliError("la clé de récupération doit être du texte UTF-8".to_string())
+            })?;
+            // `decode` vérifie la longueur, l'alphabet **et** le total de contrôle :
+            // une faute de recopie est refusée ici, pas au déverrouillage.
+            Ok(UnlockMaterial::Recovery(RecoveryKey::decode(text)?))
+        }
+
+        UnlockMode::KeyFile(path) => {
+            let bytes = passlock_platform::fs::read_file(path, RECOVERY_KEY_LEN.saturating_add(1))
+                .map_err(|err| {
+                    CliError(format!("lecture du fichier-clé {} : {err}", path.display()))
+                })?;
+            if bytes.len() != RECOVERY_KEY_LEN {
+                return Err(CliError(format!(
+                    "un fichier-clé doit faire exactement {RECOVERY_KEY_LEN} octets, or {} en \
+                     fait {}",
+                    path.display(),
+                    bytes.len()
+                )));
+            }
+            Ok(UnlockMaterial::KeyFile(SecretVec::from_slice(&bytes)))
+        }
+    }
 }
 
 /// Construit la configuration d'ouverture à partir des options globales.
@@ -113,22 +217,25 @@ fn run(hardening: passlock_platform::process::ProcessHardening) -> CliResult {
     let options = GlobalOptions {
         password_stdin: matches.get_flag("password-stdin"),
         hardening,
+        unlock: unlock_mode_from(&matches),
     };
     let config = config_from(&matches);
 
     match matches.subcommand() {
-        Some(("init", sub)) => cmd_init(sub, options, &config),
+        Some(("init", sub)) => cmd_init(sub, &options, &config),
         Some(("info", sub)) => cmd_info(sub),
-        Some(("verify", sub)) => cmd_verify(sub, options, &config),
-        Some(("change-password", sub)) => cmd_change_password(sub, options, &config),
-        Some(("calibrate", sub)) => cmd_calibrate(sub, options),
-        Some(("entry", sub)) => cmd_entry(sub, options, &config),
-        Some(("search", sub)) => cmd_search(sub, options, &config),
-        Some(("history", sub)) => cmd_history(sub, options, &config),
+        Some(("verify", sub)) => cmd_verify(sub, &options, &config),
+        Some(("change-password", sub)) => cmd_change_password(sub, &options, &config),
+        Some(("calibrate", sub)) => cmd_calibrate(sub, &options),
+        Some(("entry", sub)) => cmd_entry(sub, &options, &config),
+        Some(("search", sub)) => cmd_search(sub, &options, &config),
+        Some(("history", sub)) => cmd_history(sub, &options, &config),
+        Some(("recovery", sub)) => recovery::cmd_recovery(sub, &options, &config),
+        Some(("keyfile", sub)) => recovery::cmd_keyfile(sub, &options, &config),
         Some(("generate", sub)) => generate::cmd_generate(sub),
         Some(("passphrase", sub)) => generate::cmd_passphrase(sub),
         Some(("secret", sub)) => generate::cmd_secret(sub),
-        Some(("totp", sub)) => totp::cmd_totp(sub, options, &config),
+        Some(("totp", sub)) => totp::cmd_totp(sub, &options, &config),
         _ => Err(CliError(
             "aucune sous-commande : utilisez --help".to_string(),
         )),
@@ -136,7 +243,11 @@ fn run(hardening: passlock_platform::process::ProcessHardening) -> CliResult {
 }
 
 /// Crée un coffre neuf.
-fn cmd_init(matches: &clap::ArgMatches, options: GlobalOptions, config: &VaultConfig) -> CliResult {
+fn cmd_init(
+    matches: &clap::ArgMatches,
+    options: &GlobalOptions,
+    config: &VaultConfig,
+) -> CliResult {
     let path = vault_path(matches)?;
     report_hardening(options.hardening);
 
@@ -182,7 +293,7 @@ fn cmd_info(matches: &clap::ArgMatches) -> CliResult {
 /// Ouvre le coffre et vérifie son authenticité de bout en bout.
 fn cmd_verify(
     matches: &clap::ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;
@@ -201,7 +312,7 @@ fn cmd_verify(
 /// Change le mot de passe maître.
 fn cmd_change_password(
     matches: &clap::ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;
@@ -232,7 +343,7 @@ fn cmd_change_password(
 }
 
 /// Mesure le coût des profils de dérivation sur cette machine.
-fn cmd_calibrate(matches: &clap::ArgMatches, options: GlobalOptions) -> CliResult {
+fn cmd_calibrate(matches: &clap::ArgMatches, options: &GlobalOptions) -> CliResult {
     let budget = match matches.get_one::<String>("budget") {
         Some(value) => value
             .parse::<f64>()
@@ -346,6 +457,24 @@ fn build_command() -> Command {
                     "Emplacement de la sentinelle anti-rollback (par défaut : répertoire \
                      de configuration de l'utilisateur)",
                 ),
+        )
+        .arg(
+            Arg::new("recovery-key-stdin")
+                .long("recovery-key-stdin")
+                .help(
+                    "Ouvre le coffre avec une clé de récupération lue sur l'entrée standard. \
+                     Sans ce drapeau, `recovery test` demande la clé par une invite masquée",
+                )
+                .global(true)
+                .conflicts_with("key-file")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("key-file")
+                .long("key-file")
+                .value_name("CHEMIN")
+                .global(true)
+                .help("Ouvre le coffre avec le fichier-clé situé à ce chemin"),
         )
         .subcommand(
             Command::new("init")
@@ -490,6 +619,8 @@ fn build_command() -> Command {
                         .help("Supprime définitivement l'historique de cette entrée"),
                 ),
         )
+        .subcommand(recovery::recovery_command())
+        .subcommand(recovery::keyfile_command())
         .subcommand(generate::generate_command())
         .subcommand(generate::passphrase_command())
         .subcommand(generate::secret_command())
@@ -634,8 +765,22 @@ pub(crate) fn report_hardening(hardening: passlock_platform::process::ProcessHar
 }
 
 /// Affiche les observations faites à l'ouverture.
-fn report_diagnostics(vault: &Vault) {
+pub(crate) fn report_diagnostics(vault: &Vault) {
     let diagnostics = vault.diagnostics();
+
+    // Le niveau de durabilité est une **propriété de plateforme** : il est annoncé
+    // une fois, ici, plutôt que découvert au premier incident. Sous Unix, le niveau
+    // nominal n'appelle aucun commentaire.
+    let durability = passlock_platform::fs::platform_durability();
+    if !durability.directory_entry_is_durable() {
+        eprintln!(
+            "Avertissement de durabilité : sur cette plateforme, Passlock ne peut pas garantir \
+             qu'un fichier écrit garde son **nom** après une coupure d'alimentation — le \
+             contenu est synchronisé, pas l'entrée de répertoire. Conséquence : après un \
+             incident, une pièce jointe peut manquer alors que le coffre la référence. \
+             `passlock attach verify` le détecte ; rien n'est jamais silencieux."
+        );
+    }
 
     if diagnostics.permissions_corrected {
         eprintln!(
@@ -751,7 +896,7 @@ fn print_header(parsed: &ParsedVault<'_>) {
 }
 
 /// Encode des octets en hexadécimal minuscule.
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         // `write!` dans une `String` ne peut pas échouer ; l'écriture directe évite
@@ -811,15 +956,22 @@ fn format_timestamp(seconds: u64) -> String {
 // ---------------------------------------------------------------------------
 
 /// Ouvre le magasin, en signalant une éventuelle migration.
+///
+/// ## Seul point qui choisit le chemin d'ouverture
+///
+/// Aucune commande ne sait si le coffre a été ouvert par mot de passe, par clé de
+/// récupération ou par fichier-clé : `UnlockMaterial` est construit **ici**, à partir
+/// des options globales, et détruit en sortant. C'est ce qui garantit qu'aucun chemin
+/// d'ouverture n'échappe aux diagnostics, ni aux vérifications de permissions.
 pub(crate) fn open_store(
     path: &Path,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> Result<VaultStore, CliError> {
     report_hardening(options.hardening);
-    let password = read_password("Mot de passe maître : ", options.password_stdin)?;
+    let material = read_unlock_material(options)?;
 
-    let store = VaultStore::open(path, password.expose(), config)?;
+    let store = VaultStore::open_with(path, &material.credentials(), config)?;
 
     if let Some(from) = store.diagnostics().migrated_from {
         // Une migration modifie la forme des données de l'utilisateur : elle ne doit
@@ -837,7 +989,7 @@ pub(crate) fn open_store(
 /// Aiguille vers les sous-commandes de `entry`.
 fn cmd_entry(
     matches: &clap::ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     match matches.subcommand() {
@@ -891,7 +1043,7 @@ pub(crate) fn infer_field_kind(key: &str) -> FieldKind {
 /// Ajoute une entrée.
 fn cmd_entry_add(
     matches: &clap::ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;
@@ -951,7 +1103,7 @@ fn cmd_entry_add(
 /// Liste les entrées.
 fn cmd_entry_list(
     matches: &clap::ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;
@@ -1049,7 +1201,7 @@ fn cmd_entry_list(
 /// Affiche une entrée.
 fn cmd_entry_show(
     matches: &clap::ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;
@@ -1116,7 +1268,7 @@ fn cmd_entry_show(
 /// Déplace une entrée à la corbeille.
 fn cmd_entry_trash(
     matches: &clap::ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;
@@ -1138,7 +1290,7 @@ fn cmd_entry_trash(
 /// Restaure une entrée.
 fn cmd_entry_restore(
     matches: &clap::ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;
@@ -1155,7 +1307,7 @@ fn cmd_entry_restore(
 /// Supprime définitivement une entrée.
 fn cmd_entry_purge(
     matches: &clap::ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;
@@ -1198,7 +1350,7 @@ fn cmd_entry_purge(
 /// Recherche dans le coffre.
 fn cmd_search(
     matches: &clap::ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;
@@ -1265,7 +1417,7 @@ fn cmd_search(
 /// Affiche ou purge l'historique d'une entrée.
 fn cmd_history(
     matches: &clap::ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;

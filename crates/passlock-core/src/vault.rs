@@ -49,6 +49,7 @@ use crate::header::{Header, Slot, SlotLabel, VAULT_ID_LEN};
 use crate::kdf::{self, KdfParams};
 use crate::keys::{DataEncryptionKey, KEY_LEN, KeyEncryptionKey, MasterKey, SubKeys, WrappedKey};
 use crate::payload::Payload;
+use crate::recovery::RecoveryKey;
 use crate::rollback::{RollbackCheck, Sentinel, SentinelLoad, SentinelStore, now_unix};
 
 use passlock_platform::fs::{FileLock, app_state_dir, verify_private, write_atomic};
@@ -138,29 +139,118 @@ pub struct Unlocked {
     pub payload: Payload,
 }
 
-/// Dérive la clé de chiffrement de clé du slot maître.
+/// Matériel d'ouverture présenté à un coffre, et le rôle qu'il vise.
 ///
-/// ## Pourquoi cette fonction est publique
+/// # Pourquoi un type, et pas trois fonctions
 ///
-/// Elle marque la frontière entre « transformer un mot de passe en clé » et
-/// « exploiter cette clé ». Cette séparation a deux conséquences concrètes :
+/// Les trois mécanismes d'ouverture — mot de passe maître, clé de récupération,
+/// fichier-clé — produisent une KEK **par le même chemin** : Argon2id sur le secret
+/// du slot, puis HKDF. Seuls le rôle visé et le matériel changent. Les nommer par un
+/// type rend explicite qu'il n'existe qu'**un seul chemin de code**, et que le rôle
+/// détermine quel slot est désenveloppé.
 ///
-/// * elle rend l'étape coûteuse (Argon2id) testable **une seule fois** au lieu
-///   d'être repayée à chaque scénario de test, sans que la couverture change —
-///   la dérivation est une fonction pure de `(mot de passe, sel, paramètres)` ;
-/// * c'est le point d'insertion des futurs mécanismes d'ouverture (clé de
-///   récupération, clé matérielle) : ils produiront une KEK par un autre chemin,
-///   et tout le reste de l'ouverture sera réutilisé tel quel.
+/// # Emprunts, et non copies
+///
+/// Les variantes empruntent le matériel : présenter une clé ne doit pas en produire
+/// une seconde copie en mémoire.
+pub enum Credentials<'a> {
+    /// Mot de passe maître — slot [`SlotLabel::Master`].
+    Password(&'a [u8]),
+    /// Clé de récupération transcrite — slot [`SlotLabel::Recovery`].
+    RecoveryKey(&'a RecoveryKey),
+    /// Contenu d'un fichier-clé — slot [`SlotLabel::Hardware`].
+    KeyFile(&'a [u8]),
+}
+
+impl Credentials<'_> {
+    /// Rôle de slot visé.
+    #[must_use]
+    pub const fn label(&self) -> SlotLabel {
+        match self {
+            Self::Password(_) => SlotLabel::Master,
+            Self::RecoveryKey(_) => SlotLabel::Recovery,
+            Self::KeyFile(_) => SlotLabel::Hardware,
+        }
+    }
+
+    /// Secret présenté à la dérivation.
+    #[must_use]
+    pub fn secret(&self) -> &[u8] {
+        match self {
+            Self::Password(bytes) | Self::KeyFile(bytes) => bytes,
+            Self::RecoveryKey(key) => key.expose(),
+        }
+    }
+}
+
+// `Debug` est écrit à la main, et non dérivé : `&[u8]` afficherait **le mot de passe
+// en clair**. Les types de secret du projet rédigent leur propre `Debug` ; en dériver
+// un ici l'aurait contourné par la bande.
+impl std::fmt::Debug for Credentials<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Password(_) => "Password",
+            Self::RecoveryKey(_) => "RecoveryKey",
+            Self::KeyFile(_) => "KeyFile",
+        };
+        write!(f, "Credentials::{name}([EXPURGÉ])")
+    }
+}
+
+/// Rend le slot du rôle demandé.
 ///
 /// # Erreurs
-/// * [`Error::InvalidHeader`] si le header ne contient aucun slot maître ;
-/// * les erreurs de dérivation (paramètres refusés, mémoire insuffisante).
-pub fn derive_master_kek(header: &Header, password: &[u8]) -> Result<KeyEncryptionKey> {
-    let master_slot = header.master_slot().ok_or(Error::InvalidHeader {
-        reason: "ce coffre ne contient aucun slot de mot de passe maître",
-    })?;
+/// [`Error::InvalidHeader`] si le coffre ne porte aucun slot de ce rôle.
+fn slot_with_label(header: &Header, label: SlotLabel) -> Result<&Slot> {
+    header
+        .slots
+        .iter()
+        .find(|slot| slot.label == label)
+        .ok_or(Error::InvalidHeader {
+            reason: missing_slot_reason(label),
+        })
+}
 
-    let master_key = MasterKey::derive(password, &master_slot.salt, master_slot.params)?;
+/// Motif d'absence, propre au rôle.
+const fn missing_slot_reason(label: SlotLabel) -> &'static str {
+    match label {
+        SlotLabel::Master => "ce coffre ne contient aucun slot de mot de passe maître",
+        SlotLabel::Recovery => "ce coffre ne contient aucun slot de clé de récupération",
+        SlotLabel::Hardware => "ce coffre ne contient aucun slot de clé matérielle",
+    }
+}
+
+/// Dérive la clé de chiffrement de clé du slot d'un rôle donné.
+///
+/// ## Un seul chemin de dérivation, quel que soit le rôle
+///
+/// Les trois rôles passent par **Argon2id puis HKDF**, sans branche : c'est délibéré.
+///
+/// * Le champ `params` d'un slot est **authentifié** (il entre dans l'AAD du slot),
+///   affiché par `passlock info` **sans déverrouillage**, et sert à calculer
+///   l'avertissement « paramètres sous la recommandation ». Un slot qui déclarerait
+///   Argon2id 256 Mio sans qu'il soit appliqué porterait donc un octet authentifié
+///   décrivant une dérivation qui n'a pas eu lieu.
+/// * Le rôle ne doit pas décider du chemin : une clé de 256 bits n'a pas besoin
+///   d'étirement, mais **rien ne garantit** qu'un matériel de clé futur ait cette
+///   entropie (fichier tronqué, comblé, clé fournie par l'utilisateur). Argon2id y
+///   est un filet, pas un rituel.
+/// * Le coût — une fois par déverrouillage, sur une action humaine rare — reste sous
+///   le limiteur de concurrence en processus.
+///
+/// Ce qui n'est **pas** affirmé : qu'Argon2id renforce une clé de 256 bits contre la
+/// force brute. Il ne l'renforce pas, et cette fonction ne le prétend pas.
+///
+/// # Erreurs
+/// * [`Error::InvalidHeader`] si le coffre ne porte aucun slot de ce rôle ;
+/// * les erreurs de dérivation (paramètres refusés, mémoire insuffisante).
+pub fn derive_slot_kek(
+    header: &Header,
+    label: SlotLabel,
+    secret: &[u8],
+) -> Result<KeyEncryptionKey> {
+    let slot = slot_with_label(header, label)?;
+    let master_key = MasterKey::derive(secret, &slot.salt, slot.params)?;
     master_key.derive_kek()
 }
 
@@ -184,17 +274,12 @@ pub fn derive_master_kek(header: &Header, password: &[u8]) -> Result<KeyEncrypti
 /// # Erreurs
 /// [`Error::UnlockFailed`] si le slot ne s'ouvre pas, [`Error::Corrupted`] si le
 /// contenu est altéré, ainsi que les erreurs de format en amont.
-pub fn unlock_with_kek(bytes: &[u8], kek: &KeyEncryptionKey) -> Result<Unlocked> {
+pub fn unlock_with_kek(bytes: &[u8], kek: &KeyEncryptionKey, label: SlotLabel) -> Result<Unlocked> {
     let parsed = ParsedVault::parse(bytes)?;
 
-    let master_slot = parsed.header.master_slot().ok_or(Error::InvalidHeader {
-        reason: "ce coffre ne contient aucun slot de mot de passe maître",
-    })?;
+    let slot = slot_with_label(&parsed.header, label)?;
 
-    let dek = kek.unwrap(
-        &master_slot.wrapped,
-        &master_slot.aad(&parsed.header.vault_id),
-    )?;
+    let dek = kek.unwrap(&slot.wrapped, &slot.aad(&parsed.header.vault_id))?;
 
     let subkeys = dek.subkeys()?;
     // Le buffer déchiffré est **pris** et non emprunté : `decode_owned` transfère le
@@ -209,6 +294,26 @@ pub fn unlock_with_kek(bytes: &[u8], kek: &KeyEncryptionKey) -> Result<Unlocked>
         subkeys,
         payload,
     })
+}
+
+/// Dérive la KEK du rôle visé **et** ouvre le coffre avec elle.
+///
+/// Raccourci de composition, pour les appelants qui n'ont pas besoin de séparer les
+/// deux étapes : dérivation puis désenveloppement, exactement comme
+/// [`Vault::open_with`].
+///
+/// L'analyse du fichier est faite **deux fois**, comme dans `Vault::open_with` : elle
+/// est bon marché (aucun calcul cryptographique) et évite de faire circuler une vue
+/// empruntée à travers toute la fonction.
+///
+/// # Erreurs
+/// Voir [`derive_slot_kek`] et [`unlock_with_kek`].
+pub fn unlock_with_slot_label(bytes: &[u8], label: SlotLabel, secret: &[u8]) -> Result<Unlocked> {
+    let kek = {
+        let header = ParsedVault::parse(bytes)?.header;
+        derive_slot_kek(&header, label, secret)?
+    };
+    unlock_with_kek(bytes, &kek, label)
 }
 
 /// Lit un fichier de coffre en bornant la quantité lue.
@@ -359,14 +464,44 @@ impl Vault {
         Ok(vault)
     }
 
-    /// Ouvre un coffre existant.
+    /// Ouvre un coffre existant avec son mot de passe maître.
+    ///
+    /// Raccourci du cas le plus courant : délègue à [`Vault::open_with`] avec
+    /// [`Credentials::Password`]. Les clés de récupération et les fichiers-clés
+    /// passent par `open_with` directement.
     ///
     /// # Erreurs
-    /// * [`Error::UnlockFailed`] si le mot de passe est incorrect ou le slot altéré ;
+    /// Voir [`Vault::open_with`].
+    pub fn open(path: &Path, password: &[u8], config: &VaultConfig) -> Result<Self> {
+        Self::open_with(path, &Credentials::Password(password), config)
+    }
+
+    /// Ouvre un coffre existant avec un matériel d'ouverture quelconque.
+    ///
+    /// # Rôle du matériel
+    ///
+    /// `credentials` détermine **quel slot** est désenveloppé et **quel secret** est
+    /// présenté à la dérivation. Le reste du chemin d'ouverture est identique pour
+    /// les trois mécanismes : c'est la propriété qui garantit qu'aucun d'eux ne peut
+    /// être plus faible qu'un autre par inadvertance.
+    ///
+    /// # Conséquence sur l'alerte de retour en arrière
+    ///
+    /// Un coffre ouvert par une clé de récupération produit exactement les mêmes
+    /// diagnostics qu'un coffre ouvert par mot de passe : la comparaison à la
+    /// sentinelle porte sur la **génération**, pas sur le mode d'ouverture.
+    ///
+    /// # Erreurs
+    /// * [`Error::UnlockFailed`] si le secret est incorrect ou le slot altéré ;
     /// * [`Error::NotAVault`] si le fichier n'est pas un coffre ;
     /// * [`Error::Corrupted`] si la structure est authentique mais le contenu altéré ;
-    /// * [`Error::AlreadyLocked`] si un autre processus détient le verrou d'écriture.
-    pub fn open(path: &Path, password: &[u8], config: &VaultConfig) -> Result<Self> {
+    /// * [`Error::AlreadyLocked`] si un autre processus détient le verrou d'écriture ;
+    /// * [`Error::InvalidHeader`] si le coffre ne porte aucun slot du rôle demandé.
+    pub fn open_with(
+        path: &Path,
+        credentials: &Credentials<'_>,
+        config: &VaultConfig,
+    ) -> Result<Self> {
         let file_lock = if config.read_only {
             None
         } else {
@@ -381,17 +516,19 @@ impl Vault {
 
         let bytes = read_vault_file(path)?;
 
+        let label = credentials.label();
+
         // Le header est lu une première fois pour connaître le sel et les
-        // paramètres du slot maître : ils sont stockés dans le fichier, jamais pris
+        // paramètres du slot visé : ils sont stockés dans le fichier, jamais pris
         // dans une constante du code. L'analyse est bon marché (aucun calcul
         // cryptographique) et sera refaite par `unlock_with_kek`, ce qui évite de
         // faire circuler une vue empruntée à travers toute la fonction.
         let kek = {
             let parsed = ParsedVault::parse(&bytes)?;
-            derive_master_kek(&parsed.header, password)?
+            derive_slot_kek(&parsed.header, label, credentials.secret())?
         };
 
-        let unlocked = unlock_with_kek(&bytes, &kek)?;
+        let unlocked = unlock_with_kek(&bytes, &kek, label)?;
 
         // Le fichier n'est plus utile : le contenu est déchiffré.
         drop(bytes);
@@ -536,6 +673,226 @@ impl Vault {
         drop(master_key);
 
         self.write_to_disk()
+    }
+
+    // -----------------------------------------------------------------------
+    // Slots supplémentaires : clé de récupération, clé matérielle
+    // -----------------------------------------------------------------------
+
+    /// Rôles des slots présents, dans l'ordre du header.
+    #[must_use]
+    pub fn slot_labels(&self) -> Vec<SlotLabel> {
+        self.header.slots.iter().map(|slot| slot.label).collect()
+    }
+
+    /// Installe un slot supplémentaire, en enveloppant la DEK courante.
+    ///
+    /// ## Le coût réel, dit sans l'embellir
+    ///
+    /// Ajouter un slot **n'est pas O(1)** sur le fichier de coffre. Le header entier
+    /// entre dans l'AAD du payload (`container::seal`) : le prochain enregistrement
+    /// **ré-écrit tout le payload**, parce que son tag doit couvrir le nouveau header.
+    /// C'est le prix assumé d'`ADR-005`, proportionnel à la taille du payload — pas à
+    /// celle des pièces jointes, qui vivent hors du conteneur et ne sont pas touchées.
+    ///
+    /// Ce que l'opération a bien d'instantané : aucun rechiffrement du contenu sous une
+    /// nouvelle clé, aucune nouvelle dérivation de la DEK, et les autres slots restent
+    /// valides tels quels.
+    ///
+    /// ## Aucune écriture ici
+    ///
+    /// Cette méthode modifie l'état en mémoire. L'appelant doit faire suivre d'un
+    /// [`Vault::save`] ; une mutation non enregistrée est perdue, c'est le contrat du
+    /// magasin.
+    ///
+    /// # Refus
+    /// * [`Error::ReadOnly`] sur un coffre ouvert en lecture seule ;
+    /// * [`Error::InvalidInput`] pour le rôle maître — il s'installe par
+    ///   [`Vault::change_password`], qui exige le mot de passe actuel. Autoriser
+    ///   `install_slot(Master, …)` contournerait cette ré-authentification ;
+    /// * [`Error::InvalidInput`] si un slot de ce rôle existe déjà : remplacer est un
+    ///   acte distinct, et se tromper de méthode ne doit pas écraser silencieusement une
+    ///   clé de récupération déjà rangée.
+    pub fn install_slot(
+        &mut self,
+        label: SlotLabel,
+        secret: &[u8],
+        params: KdfParams,
+    ) -> Result<()> {
+        self.refuse_non_master_role(label)?;
+
+        if self.header.slots.iter().any(|slot| slot.label == label) {
+            return Err(Error::InvalidInput {
+                reason: "un slot de ce rôle est déjà installé ; utilisez `replace_slot`",
+            });
+        }
+
+        let id = self.allocate_slot_id()?;
+        let slot = self.build_slot(label, secret, params, id)?;
+
+        let mut candidate = self.header.slots.clone();
+        candidate.push(slot);
+        self.apply_candidate_slots(candidate)
+    }
+
+    /// Remplace le slot d'un rôle, en conservant son identifiant.
+    ///
+    /// L'identifiant est conservé parce qu'il entre dans l'AAD du slot : le réutiliser
+    /// n'affaiblit rien (le sel et la clé enveloppée changent) et évite de faire
+    /// diverger la numérotation des slots à chaque rotation.
+    ///
+    /// Le coût et le contrat d'écriture sont ceux d'[`Vault::install_slot`].
+    ///
+    /// # Refus
+    /// Les mêmes, plus [`Error::InvalidHeader`] si aucun slot de ce rôle n'existe.
+    pub fn replace_slot(
+        &mut self,
+        label: SlotLabel,
+        secret: &[u8],
+        params: KdfParams,
+    ) -> Result<()> {
+        self.refuse_non_master_role(label)?;
+
+        let index = self
+            .header
+            .slots
+            .iter()
+            .position(|slot| slot.label == label)
+            .ok_or(Error::InvalidHeader {
+                reason: missing_slot_reason(label),
+            })?;
+        let id = self.header.slots[index].id;
+        let slot = self.build_slot(label, secret, params, id)?;
+
+        let mut candidate = self.header.slots.clone();
+        candidate[index] = slot;
+        self.apply_candidate_slots(candidate)
+    }
+
+    /// Révoque le slot d'un rôle.
+    ///
+    /// ## Ce que la révocation ne fait pas
+    ///
+    /// Elle ne rend pas inutilisable une clé déjà recopiée ailleurs : si la clé de
+    /// récupération a été photographiée, la révocation retire le slot du coffre mais ne
+    /// reprend pas la copie. Il faut **considérer la clé comme compromise**.
+    ///
+    /// Elle ne ré-écrit pas non plus les sauvegardes antérieures, qui contiennent
+    /// toujours le slot.
+    ///
+    /// Le coût et le contrat d'écriture sont ceux d'[`Vault::install_slot`].
+    ///
+    /// # Refus
+    /// * [`Error::ReadOnly`], [`Error::InvalidHeader`] si le rôle est absent ;
+    /// * [`Error::InvalidInput`] s'il s'agit du **dernier** slot, ou du dernier slot
+    ///   maître : dans les deux cas le coffre deviendrait inouvrable par le chemin
+    ///   restant.
+    pub fn revoke_slot(&mut self, label: SlotLabel) -> Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+
+        let index = self
+            .header
+            .slots
+            .iter()
+            .position(|slot| slot.label == label)
+            .ok_or(Error::InvalidHeader {
+                reason: missing_slot_reason(label),
+            })?;
+
+        if self.header.slots.len() == 1 {
+            return Err(Error::InvalidInput {
+                reason: "impossible de révoquer le dernier slot : le coffre deviendrait \
+                         définitivement inouvrable",
+            });
+        }
+        if label == SlotLabel::Master
+            && self
+                .header
+                .slots
+                .iter()
+                .filter(|slot| slot.label == SlotLabel::Master)
+                .count()
+                == 1
+        {
+            return Err(Error::InvalidInput {
+                reason: "impossible de révoquer le dernier slot maître : le coffre ne serait \
+                         plus ouvrable par mot de passe",
+            });
+        }
+
+        let mut candidate = self.header.slots.clone();
+        candidate.remove(index);
+        self.apply_candidate_slots(candidate)
+    }
+
+    /// Refuse en lecture seule et pour le rôle maître.
+    ///
+    /// Un seul point de refus, pour que les deux méthodes d'installation ne puissent
+    /// pas diverger sur cette règle.
+    fn refuse_non_master_role(&self, label: SlotLabel) -> Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        if label == SlotLabel::Master {
+            return Err(Error::InvalidInput {
+                reason: "le rôle maître s'installe et se remplace par `change_password`, qui \
+                         exige le mot de passe actuel",
+            });
+        }
+        Ok(())
+    }
+
+    /// Construit un slot neuf, avec un sel neuf, en enveloppant la DEK courante.
+    fn build_slot(
+        &self,
+        label: SlotLabel,
+        secret: &[u8],
+        params: KdfParams,
+        id: u16,
+    ) -> Result<Slot> {
+        let salt = kdf::generate_salt()?;
+        let master_key = MasterKey::derive(secret, &salt, params)?;
+        let kek: KeyEncryptionKey = master_key.derive_kek()?;
+
+        let mut slot = Slot {
+            id,
+            label,
+            params,
+            salt,
+            wrapped: WrappedKey::placeholder(),
+        };
+        // Les métadonnées du slot entrent dans sa propre AAD : le rôle, le sel et les
+        // paramètres sont donc authentifiés, et un slot déplacé vers un autre rôle ne
+        // s'ouvre pas.
+        let aad = slot.aad(&self.header.vault_id);
+        slot.wrapped = kek.wrap(&self.dek, &aad)?;
+
+        drop(kek);
+        drop(master_key);
+        Ok(slot)
+    }
+
+    /// Rend un identifiant de slot libre.
+    fn allocate_slot_id(&self) -> Result<u16> {
+        (0..=u16::MAX)
+            .find(|candidate| !self.header.slots.iter().any(|slot| slot.id == *candidate))
+            .ok_or(Error::InvalidInput {
+                reason: "aucun identifiant de slot disponible",
+            })
+    }
+
+    /// Valide une liste de slots **avant** de l'appliquer.
+    ///
+    /// C'est le motif « valider puis appliquer » de la phase 2 : le header candidat est
+    /// construit par `Header::from_parts`, qui rejette une liste vide, un dépassement de
+    /// `MAX_SLOTS` et des identifiants dupliqués. En cas d'échec, `self.header` est
+    /// **inchangé**.
+    fn apply_candidate_slots(&mut self, candidate: Vec<Slot>) -> Result<()> {
+        let header = Header::from_parts(self.header.vault_id, self.header.created_at, candidate)?;
+        self.header = header;
+        Ok(())
     }
 
     /// Détruit les clés et le contenu déchiffré.
@@ -911,14 +1268,14 @@ mod tests {
         // même fonction de déverrouillage que `Vault::open` utilise.
         let kek = {
             let parsed = ParsedVault::parse(&original).expect("analyse");
-            derive_master_kek(&parsed.header, PASSWORD).expect("dérivation")
+            derive_slot_kek(&parsed.header, SlotLabel::Master, PASSWORD).expect("dérivation")
         };
 
         for index in wrapped_start..wrapped_end {
             let mut bytes = original.clone();
             bytes[index] ^= 0x01;
 
-            let outcome = unlock_with_kek(&bytes, &kek);
+            let outcome = unlock_with_kek(&bytes, &kek, SlotLabel::Master);
             assert!(
                 matches!(outcome, Err(Error::UnlockFailed)),
                 "un octet altéré à l'offset {index} de la clé enveloppée doit produire \
@@ -1231,14 +1588,14 @@ mod tests {
         let original = std::fs::read(&path).expect("lecture");
         let kek = {
             let parsed = ParsedVault::parse(&original).expect("analyse");
-            derive_master_kek(&parsed.header, PASSWORD).expect("dérivation")
+            derive_slot_kek(&parsed.header, SlotLabel::Master, PASSWORD).expect("dérivation")
         };
 
         for index in 0..original.len() {
             let mut bytes = original.clone();
             bytes[index] ^= 0x01;
 
-            match unlock_with_kek(&bytes, &kek) {
+            match unlock_with_kek(&bytes, &kek, SlotLabel::Master) {
                 Ok(unlocked) => {
                     // Cas légitime : l'octet modifié n'est pas authentifié. On
                     // s'assure alors qu'aucun contenu incohérent n'est produit.
@@ -1288,12 +1645,12 @@ mod tests {
         let original = std::fs::read(&path).expect("lecture");
         let kek = {
             let parsed = ParsedVault::parse(&original).expect("analyse");
-            derive_master_kek(&parsed.header, PASSWORD).expect("dérivation")
+            derive_slot_kek(&parsed.header, SlotLabel::Master, PASSWORD).expect("dérivation")
         };
 
         for len in 0..original.len() {
             assert!(
-                unlock_with_kek(&original[..len], &kek).is_err(),
+                unlock_with_kek(&original[..len], &kek, SlotLabel::Master).is_err(),
                 "troncature à {len} octets acceptée"
             );
         }

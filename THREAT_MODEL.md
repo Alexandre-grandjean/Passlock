@@ -20,7 +20,7 @@ Par ordre de sensibilité décroissante.
 | A5 | Pièces jointes | blobs chiffrés séparés *(phase 4)* | oui, chiffrés |
 | A6 | Métadonnées (titres, URLs, dossiers, dates d'entrée) | payload chiffré *(phase 2)* | oui, chiffrées |
 | A7 | Fichier de coffre et sauvegardes | disque / support externe | oui, chiffré |
-| A8 | Clé de récupération | **hors machine**, support physique *(phase 4)* | non (utilisateur) |
+| A8 | Clé de récupération | **hors machine**, support physique | non (utilisateur) |
 | A9 | Sentinelle anti-retour-en-arrière | répertoire de configuration | oui, authentifiée |
 | A10 | Journal de sécurité | payload chiffré *(phase 2)* | oui, chiffré |
 
@@ -74,8 +74,9 @@ permettant de les établir sérieusement, et en inventer donnerait une fausse
 précision.
 
 État : **F1**/**F2**/**F3** = traité respectivement en phase 1, 2 ou 3 (implémenté et
-testé) · **F4**–**F7** = prévu à la phase indiquée · **—** = hors périmètre ou non
-implémenté. Le contenu des phases fait autorité dans [`ROADMAP.md`](ROADMAP.md).
+testé) · **F4.1** = livré à l'étape 1 de la phase 4 (récupération) · **F4**–**F7** =
+prévu à la phase indiquée · **—** = hors périmètre ou non implémenté. Le contenu des
+phases fait autorité dans [`ROADMAP.md`](ROADMAP.md).
 
 | # | Menace | Impact | Prob. | Mesure défensive | Limite de la défense | État |
 |---|---|---|---|---|---|---|
@@ -109,7 +110,7 @@ implémenté. Le contenu des phases fait autorité dans [`ROADMAP.md`](ROADMAP.m
 | T28 | Chemin contrôlé par l'utilisateur | Élevé | Moyenne | un titre d'entrée n'est jamais un chemin ; jetons aléatoires pour les fichiers internes ; octets nuls refusés | le répertoire choisi par l'utilisateur reste sous sa responsabilité | **F1** |
 | T29 | Corruption du magasin | Élevé (disponibilité) | Faible | **il n'y a plus de base de données** : SQLite a été abandonné en phase 2 (ADR-020). Le décodage d'archive est **borné et vérifié** ; l'écriture du conteneur est atomique | une corruption du contenu reste un défaut du programme, pas un scénario exploitable ; une corruption du **fichier** est détectée par le tag AEAD. *Cette ligne décrivait une base SQLite : elle était devenue fausse* | **F2** |
 | T30 | Compromission physique du périphérique | Critique | Faible | chiffrement au repos, verrouillage automatique | DMA, cold boot, puce espionne : hors périmètre | — |
-| T31 | Perte totale de l'appareil | Élevé (disponibilité) | Moyenne | sauvegarde + **test de restauration** + clé de récupération | sans sauvegarde ni clé de récupération, la perte est **définitive** | **F4** |
+| T31 | Perte totale de l'appareil | Élevé (disponibilité) | Moyenne | sauvegarde + **test de restauration** + clé de récupération | sans sauvegarde ni clé de récupération, la perte est **définitive** | **F4.1 partiel** — clé de récupération **livrée** ; sauvegardes et test de restauration à l'étape 3 |
 | T32 | Traversée de chemin / zip slip | Élevé | Faible | assainissement des noms, `O_EXCL`, écriture dans un répertoire créé par nous | — | **F4** |
 
 ## 5. Scénarios d'attaque détaillés

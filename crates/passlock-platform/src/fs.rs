@@ -26,11 +26,16 @@
 //!
 //! ## Ce que ce module ne protège pas
 //!
-//! * Un attaquant qui contrôle un **composant intermédiaire** du chemin — par
-//!   exemple `~/a/b/coffre.plk` où `~/a` est un lien symbolique. Seule une marche
-//!   composant par composant ou `openat2(RESOLVE_NO_SYMLINKS)` répondrait
-//!   complètement. Non implémenté, documenté comme limite connue.
 //! * Un attaquant disposant de `root`, qui contourne toute vérification.
+//!
+//! **NOTE DE CORRECTION.** Une version antérieure de ce commentaire affirmait que
+//! les composants **intermédiaires** du chemin n'étaient pas protégés, « seule une
+//! marche composant par composant ou `openat2` répondrait complètement — non
+//! implémenté ». **C'était faux depuis la passe V9–V12 de la phase 1** :
+//! `open_dir_no_symlinks` implémente précisément cette marche, et chaque opération
+//! de ce module y passe. `SECURITY.md` limite **L1** est marquée **CORRIGÉE** pour
+//! la même raison, et `THREAT_MODEL.md` §5.3 le détaille. Laisser cette phrase en
+//! place aurait fait passer une protection réelle pour absente.
 //!
 //! ## Systèmes de fichiers sans permissions
 //!
@@ -41,6 +46,63 @@
 
 use std::io;
 use std::path::Path;
+
+/// Niveau de durabilité **réellement atteint** après une écriture.
+///
+/// # Pourquoi un type de retour, et non une erreur
+///
+/// La persistance de l'**entrée de répertoire** n'a pas d'équivalent retenu sous
+/// Windows : `fsync` sur un descripteur de répertoire y est propre à NTFS et ne
+/// porte pas la même sémantique d'ordonnancement. Exposer cette étape comme une
+/// opération faillible obligerait chaque appelant à choisir entre **échouer** sur
+/// une plateforme et **ignorer une erreur** — c'est-à-dire entre une indisponibilité
+/// fonctionnelle non annoncée et une garantie silencieusement absente. Les deux sont
+/// refusées ici.
+///
+/// Le niveau est donc **retourné** par [`make_durable`], et `make_durable` n'échoue
+/// que sur une **vraie** erreur d'entrée/sortie. Le type est `#[must_use]` :
+/// l'ignorer ne compile pas proprement.
+///
+/// # Ce que le niveau veut dire, et ne veut pas dire
+///
+/// * [`Durability::DirectoryEntrySynced`] — le contenu **et** le nom sont durables.
+/// * [`Durability::FileOnly`] — seul le contenu est durable. Après une coupure, le
+///   nom peut manquer : le fichier devient invisible, ce qui produit une **absence
+///   détectable**, jamais une donnée fausse.
+///
+/// Le niveau est une **propriété de plateforme**, pas d'un appel : il ne dépend ni
+/// du fichier ni du chemin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum Durability {
+    /// Le fichier est synchronisé **et** son entrée de répertoire est durable.
+    DirectoryEntrySynced,
+    /// Le fichier est synchronisé. **La persistance du nom dans le répertoire
+    /// n'est pas revendiquée.**
+    FileOnly,
+}
+
+impl Durability {
+    /// Vrai si la persistance de l'entrée de répertoire est revendiquée.
+    #[must_use]
+    pub const fn directory_entry_is_durable(self) -> bool {
+        matches!(self, Self::DirectoryEntrySynced)
+    }
+
+    /// Description destinée à l'utilisateur, sans jargon de plateforme.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::DirectoryEntrySynced => {
+                "contenu et nom du fichier rendus durables (fsync du fichier et du répertoire)"
+            }
+            Self::FileOnly => {
+                "contenu du fichier rendu durable ; la persistance du nom dans le répertoire \
+                 n'est pas garantie sur cette plateforme (non vérifiée)"
+            }
+        }
+    }
+}
 
 /// Écrit `data` dans `target` de façon atomique.
 ///
@@ -101,6 +163,125 @@ pub use crate::backend::verify_private;
 /// l'opération, avec la course résiduelle documentée.
 #[cfg(unix)]
 pub use crate::backend::open_dir_no_symlinks;
+
+/// Crée un fichier **neuf** en création exclusive, avec les permissions privées.
+///
+/// # Pourquoi une primitive distincte de [`write_atomic`]
+///
+/// `write_atomic` a une **sémantique de remplacement** : elle écrit un temporaire
+/// puis le renomme sur la cible, et **écrase donc une destination existante**. Elle
+/// n'est pas adaptée aux destinations qui doivent **obligatoirement être nouvelles**.
+/// Ce n'est pas un défaut de `write_atomic` : c'est exactement ce qu'il faut pour le
+/// coffre, qu'il faut précisément remplacer.
+///
+/// Ici, la création est **exclusive** : `O_CREAT|O_EXCL` sous Unix, `CREATE_NEW`
+/// sous Windows. Le contrôle d'existence et la création sont donc **un seul appel**,
+/// ce qui ferme toute fenêtre entre les deux. **Aucun pré-contrôle d'existence n'est
+/// utilisé** — pas même [`path_exists`], qui n'existe que pour l'énumération et le
+/// rapport, jamais comme garde avant une création.
+///
+/// # Garanties
+///
+/// | | Unix | Windows |
+/// |---|---|---|
+/// | Chemin | marche composant par composant, `O_NOFOLLOW` depuis le descripteur du précédent — **protection atomique** | vérification **préalable** des composants : **non équivalente**, sujette à une course |
+/// | Permissions | mode `0600` posé par le noyau **à la création** | DACL restrictive visée, posée **dans l'appel de création** ; **NON VÉRIFIÉE** |
+/// | Écrasement | impossible | impossible |
+///
+/// Le descripteur est rendu **ouvert** : l'appelant écrit, puis appelle
+/// [`make_durable`] avant de considérer la donnée comme durable.
+///
+/// # Erreurs
+/// `io::ErrorKind::AlreadyExists` si la cible existe ; `InvalidInput` si un composant
+/// du chemin est un lien symbolique ; l'erreur du système sinon.
+pub use crate::backend::create_private_file;
+
+/// Crée un répertoire privé (mode `0700`), et **rend durable son entrée parente**.
+///
+/// Refuse un chemin dont un composant est un lien symbolique, et refuse d'écraser un
+/// répertoire existant. Rend le [`Durability`] atteint, pour la même raison que
+/// [`make_durable`] : la garantie dépend de la plateforme, et l'appelant ne doit pas
+/// avoir à choisir entre échouer et l'ignorer.
+pub use crate::backend::create_dir_private;
+
+/// Supprime un fichier, sans jamais suivre de lien symbolique.
+///
+/// **Aucune synchronisation de répertoire n'est effectuée**, délibérément : après une
+/// coupure, un fichier supprimé peut réapparaître. Le mode de défaillance est alors
+/// un **orphelin** — invisible et inoffensif — et non une donnée manquante. On
+/// synchronise là où l'échec créerait une promesse non tenue.
+pub use crate::backend::remove_file;
+
+/// Supprime un répertoire **vide**, sans suivre de lien symbolique.
+///
+/// Sert au nettoyage des répertoires que nous avons créés et dont la création a
+/// échoué en cours de route.
+pub use crate::backend::remove_dir;
+
+/// Liste les noms des entrées d'un répertoire, sans suivre de lien symbolique.
+///
+/// # Limite assumée
+///
+/// Une erreur de lecture en cours d'énumération est indiscernable de la fin de
+/// l'énumération. La conséquence est une liste **tronquée**, donc **plus courte** :
+/// pour un ramasse-miettes qui supprime « ce qui est présent et non référencé », cela
+/// signifie **moins** de suppressions, jamais plus. Le mode de défaillance va dans le
+/// sens sûr.
+pub use crate::backend::list_dir;
+
+/// Lit un fichier entier, en refusant de dépasser `max_len` octets.
+///
+/// La borne est **structurelle** et vérifiée pendant la lecture, jamais déduite
+/// d'une taille annoncée par le fichier. Tout ce qui n'est pas un fichier ordinaire
+/// est refusé — un FIFO bloquerait la lecture indéfiniment.
+pub use crate::backend::read_file;
+
+/// Ouvre un fichier ordinaire en lecture seule, sans suivre de lien symbolique.
+///
+/// Variante **en flux** de [`read_file`], pour les fichiers dont la taille n'est pas
+/// connue à l'avance ou dépasse ce qu'on veut tenir en mémoire.
+pub use crate::backend::open_read;
+
+/// Vrai si l'entrée existe, **sans la suivre** (un lien symbolique existe).
+///
+/// # Usage
+///
+/// Énumération et rapport **uniquement**. Jamais comme garde avant une création :
+/// une création doit utiliser une primitive **exclusive**, qui rend le contrôle et
+/// l'action atomiques.
+pub use crate::backend::path_exists;
+
+/// Rend durable ce qui vient d'être écrit dans `dir`, et **rend le niveau atteint**.
+///
+/// # Unix
+/// `fsync` du fichier, **puis** `fsync` du descripteur de répertoire : le contenu
+/// **et le nom** deviennent durables. Retourne [`Durability::DirectoryEntrySynced`].
+///
+/// # Windows
+/// `FlushFileBuffers` du fichier **seulement**. Retourne [`Durability::FileOnly`] :
+/// la persistance du nom dans le répertoire **n'est pas revendiquée**, et le niveau
+/// réduit est **rapporté** à l'utilisateur plutôt que dissimulé.
+///
+/// # Distinction essentielle
+///
+/// Une **capacité absente** n'est pas une **erreur** : elle change la valeur
+/// retournée. Une **vraie** erreur d'entrée/sortie, en revanche, fait échouer
+/// l'opération — on ne confond pas « cette plateforme ne sait pas le faire » avec
+/// « le système a refusé ».
+pub use crate::backend::make_durable;
+
+/// Niveau de durabilité que **cette plateforme** peut atteindre.
+///
+/// Sert à **rapporter** la garantie au moment de l'ouverture d'un coffre, sans avoir
+/// à écrire quoi que ce soit : une capacité réduite doit être annoncée, pas découverte
+/// au premier incident.
+///
+/// La cohérence avec [`make_durable`] n'est pas laissée à la discipline : un test
+/// (`platform_durability_matches_what_make_durable_returns`) vérifie que les deux
+/// disent la même chose sur la plateforme courante.
+pub const fn platform_durability() -> Durability {
+    crate::backend::platform_durability()
+}
 
 /// Refuse un chemin dont l'un des composants est un lien symbolique.
 ///

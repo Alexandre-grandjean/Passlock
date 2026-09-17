@@ -6,7 +6,7 @@
 
 ## Statut du projet
 
-**Phases 0 à 3 terminées et approuvées. La phase 4 n'a pas commencé.**
+**Phases 0 à 3 terminées et approuvées. Phase 4 en cours — étape 1 sur 5 close.**
 
 Ce qui existe et est testé : dérivation de clés, chiffrement authentifié, hiérarchie
 de clés, conteneur et son format, écriture atomique, verrouillage, sentinelle
@@ -16,9 +16,9 @@ de passe et de secrets arbitraires ; HOTP et TOTP avec analyse des URI
 `otpauth://` ; interface en ligne de commande headless.
 
 Ce qui n'existe **pas encore** : pièces jointes, sauvegardes, test de restauration,
-clé de récupération, import/export, presse-papiers *(phase 4)* ; centre de sécurité et
-analyse d'URL *(phase 5)* ; interface graphique *(phase 6)* ; audit externe, SBOM,
-build reproductible *(phase 7)*.
+import/export, presse-papiers *(phase 4, étapes 2 à 5)* ; centre de sécurité et analyse
+d'URL *(phase 5)* ; interface graphique *(phase 6)* ; audit externe, SBOM, build
+reproductible *(phase 7)*.
 
 **Le contenu, l'ordre, les dépendances et l'état des phases font autorité dans
 [`ROADMAP.md`](ROADMAP.md).** Ce document-ci ne les redéfinit pas : il énonce les
@@ -157,7 +157,7 @@ un suivi explicite.
 | # | Limite | Conséquence | Suivi |
 |---|---|---|---|
 | L1 | ~~Composants intermédiaires non protégés~~ → **CORRIGÉ** : marche composant par composant, chaque répertoire ouvert avec `O_NOFOLLOW` **depuis le descripteur du précédent** | un composant symbolique n'importe où dans le chemin est refusé, avec un message nommant le composant et indiquant le remède | reste : chaque composant est ouvert en lecture, donc un répertoire traversable mais non lisible est refusé ; et `..` reste accepté (entrée de répertoire ordinaire) |
-| L2 | Vérification des permissions **non implémentée sur Windows** | la confidentialité repose sur les ACL héritées du profil utilisateur | à corriger (`GetNamedSecurityInfoW`) |
+| L2 | **Vérification des permissions non implémentée sur Windows**, et la **pose** d'une DACL n'a jamais été observée. Depuis l'étape 1 de la phase 4, les fichiers sensibles **neufs** (fichier-clé, puis blobs, exports et sauvegardes) sont créés par un appel qui **vise** à poser une DACL restrictive **dans l'appel de création** — code **compilé et vérifié statiquement**, **jamais exécuté**. Le **coffre lui-même** continue de reposer sur les ACL héritées de son profil, et rien ne les vérifie | pour le coffre : créer ou déplacer un fichier hors du profil utilisateur (dossier partagé, racine d'un disque) le rendrait accessible à d'autres comptes sans avertissement. Pour les fichiers neufs : la DACL visée est **correcte par construction**, mais **NON VÉRIFIÉE** — sa composition réelle après création n'a pas été constatée | à corriger (`GetNamedSecurityInfoW` + parcours d'ACL), et à **exécuter** sur un Windows réel. Le code de pose **échoue fermé** : une DACL non constructible fait échouer la création, jamais une écriture en permissions héritées (ADR-016, §4.8) |
 | L3 | Vidages mémoire et restriction de `ptrace` non appliqués sur Windows | un vidage peut contenir des secrets | à corriger (WER, filtre d'exception) |
 | L4 | `MADV_DONTDUMP` sans équivalent Windows utilisable sans privilèges | — | limitation acceptée |
 | L5 | Effacement mémoire non garanti | copies possibles dans les registres, la pile et les blocs recyclés par l'allocateur | limitation acceptée, documentée. **La mention du cache SQLite a été retirée en phase 2** : SQLite a été abandonné, ce cache n'existe plus |
@@ -181,6 +181,8 @@ un suivi explicite.
 | L23 | Le secret TOTP transite par un `String` lors de l'analyse de l'URI | même limite que L18 | assumé, hérité du modèle de champs |
 | L24 | **`cargo deny` ne couvre pas les données tierces embarquées** — il vérifie les licences des *crates*, pas des fichiers livrés. Les listes de mots (CC-BY 3.0) et la future liste des suffixes publics (MPL-2.0) échappent donc à la vérification automatique | une licence de donnée embarquée pourrait changer à l'insu du projet | contrôlée **manuellement** par `ATTRIBUTION.md`, avec empreinte épinglée et test d'intégrité. **MPL-2.0 n'est pas dans la liste blanche de `deny.toml`** : elle n'y entrera pas, un fichier de données n'étant pas une dépendance de crate. Précisé en §6.3 |
 | L25 | **La liste des suffixes publics vieillit**, et rien ne le corrige automatiquement (aucun réseau, par conception) | un suffixe récent peut ne pas être reconnu : le regroupement eTLD+1 est alors **incertain** et doit être présenté comme tel | ré-embarquement délibéré, commit revu, âge de la liste **affiché** par le centre de sécurité. Stratégie en `ROADMAP.md` §5.4 |
+| L26 | **Un fichier-clé est un fichier : il se copie.** Ce n'est donc pas un facteur de possession inviolable, contrairement à un jeton matériel qui ne peut pas être dupliqué | une copie du fichier clé ouvre le coffre depuis n'importe quelle machine, et rien ne permet de le détecter | dit à l'utilisateur à chaque installation, et repris dans `ROADMAP.md` §4 : le support doit être **physiquement distinct** du coffre et des sauvegardes, et présent seulement pendant l'ouverture. Un vrai facteur matériel (FIDO2 `hmac-secret`) est **repoussé et dit comme tel** — il exigerait `hidapi`/`libusb`, donc du C, et sortirait de la politique de dépendances (ADR-032) |
+| L27 | **La durabilité de l'entrée de répertoire n'est pas revendiquée sous Windows.** `make_durable` y retourne `FileOnly` : le contenu est synchronisé, pas le nom | après une coupure d'alimentation, une pièce jointe peut manquer alors que le coffre la référence — une **promesse non tenue** | le niveau est **rendu** par la primitive (`Durability`, `#[must_use]`) et **rapporté à l'ouverture** du coffre, jamais tu. L'absence est détectée par `attach verify` (étape 2). Reprise en phase 7 avec un exécuteur Windows réel |
 
 ### 4.1 L'alerte de retour en arrière est persistante — et c'est délibéré
 
@@ -349,6 +351,27 @@ l'absence de biais modulo.
 **Ce qui n'a pas changé** : aucune constante cryptographique, aucun paramètre de
 dérivation, aucun octet de format.
 
+### 4.8 Ce que la phase 4, étape 1, a ajouté comme surface
+
+Deux mécanismes d'ouverture supplémentaires et un socle d'écriture de fichiers. Les
+surfaces nouvelles sont **bornées et énumérées**, comme aux phases précédentes.
+
+| Surface | Nature | Traitement |
+|---|---|---|
+| **Encodage Crockford Base32** *(nouveau décodeur)* | texte recopié à la main par l'utilisateur | alphabet fermé (32 symboles, `U` refusé), casse ignorée, `I`/`L`→`1` et `O`→`0`, séparateurs non significatifs, longueur exacte exigée, **bits de remplissage nuls exigés** — donc **une seule chaîne par clé** |
+| **Total de contrôle de 40 bits** | détecte une faute de recopie | `SHA-256` tronqué, sur un domaine étiqueté, vérifié en **temps constant**. Refuse **avant** toute dérivation : une clé mal recopiée ne coûte pas un Argon2id |
+| **Slots supplémentaires** | un chemin d'entrée de plus, donc une surface d'accès de plus | `install_slot` et `replace_slot` **refusent le rôle maître** : `change_password` reste le seul chemin, et il exige le mot de passe actuel. Un slot déplacé vers un autre coffre ne s'ouvre pas (son AAD contient l'identifiant du coffre) |
+| **Fichier-clé** | 32 octets aléatoires, écrits sur un support choisi par l'utilisateur | création **exclusive** (`O_EXCL`/`CREATE_NEW`), permissions restrictives posées à la création, `fsync` puis `fsync` du répertoire, **nettoyage restreint à ce qui a été créé**. **Unix : exécuté et testé. Windows : compilé, jamais exécuté — NON VÉRIFIÉ** |
+| **Durabilité dépendante de la plateforme** | la garantie n'est pas la même partout | `Durability` est **rendue** par la primitive, `#[must_use]`, et **rapportée à l'ouverture** du coffre. Une capacité absente n'est pas une erreur, et elle n'est pas tue. **Unix : mesuré. Windows : déclaré par `platform_durability`, NON VÉRIFIÉ** (L27) |
+| **Deux options globales d'ouverture** (`--recovery-key-stdin`, `--key-file`) | propagées à toutes les commandes | `open_store` est le **seul** point qui choisit le chemin d'ouverture : aucun chemin n'échappe aux diagnostics. **Aucun secret en argument de commande** |
+| **Clé de récupération affichée sur stdout** | un secret quitte le processus par un canal redirigeable | assumé et dit : c'est le seul moyen de la remettre à l'utilisateur. Affichée **une seule fois**, jamais journalisée, jamais recopiée sur la sortie d'erreur |
+
+**Note de correction.** Une version antérieure de `SECURITY.md` §8 affirmait, à propos
+des slots, que « l'ajout et la révocation sont en O(1) ». **C'était faux** pour le
+fichier de coffre : le header entier entre dans l'AAD du payload, donc ajouter un slot
+**ré-écrit tout le payload** au prochain enregistrement. Le §3.2 de ce même document le
+disait correctement, et la contradiction a été corrigée dans le §8.
+
 ## 5. Journalisation
 
 Règle : **aucun journal ne contient de secret.**
@@ -478,20 +501,36 @@ contournées :
   elle créerait un **second chemin attaquable** affaiblissant le coffre.
 * Pas de « réinitialisation » qui perdrait les données en silence.
 
-La récupération est conçue comme un **slot de clé supplémentaire** (phase 4) :
+La récupération est conçue comme un **slot de clé supplémentaire**, et livrée à
+l'étape 1 de la phase 4 :
 
 * clé de récupération de 256 bits tirée au hasard, encodée en base32 Crockford avec
   total de contrôle ;
 * enveloppe la **même** DEK, donc aucun rechiffrement du contenu ;
-* ajout et révocation en O(1), sans toucher aux autres slots.
+* ajout et révocation **sans toucher aux autres slots**, qui restent valides tels quels.
+
+**NOTE DE CORRECTION — le coût réel, dit sans l'embellir.** Une version antérieure de ce
+paragraphe affirmait que l'ajout et la révocation sont « en O(1) ». **C'était faux pour le
+fichier de coffre.** Le header entier entre dans l'AAD du payload (`ADR-005`) : ajouter
+un slot **ré-écrit tout le payload** au prochain enregistrement, parce que son tag doit
+couvrir le nouveau header. Le coût est donc proportionnel à la taille du **payload** —
+et non à celle des pièces jointes, qui vivent hors du conteneur et ne sont effectivement
+pas touchées. C'est là que le bénéfice O(1) est réel, et c'est ce que dit §3.2 depuis la
+phase 1. Les deux affirmations ne pouvaient pas être vraies ensemble ; c'est celle-ci qui
+a été corrigée.
+
+**La clé matérielle est un fichier.** Livrée par le même chemin de code que la clé de
+récupération, elle n'est pas un facteur de possession inviolable : un fichier se copie.
+Voir la limite **L26**.
 
 **Compromis assumé, à énoncer clairement à l'utilisateur :** chaque slot est un
 chemin d'entrée supplémentaire. Récupérabilité et résistance au vol varient en sens
 inverse. L'atténuation est que la clé de récupération, à 256 bits, n'est **pas**
 attaquable par force brute — le risque n'est donc pas cryptographique mais
-**physique**. Conséquence pratique : la clé de récupération doit être rangée dans un
-lieu **physiquement distinct des sauvegardes**. Une clé rangée à côté du disque de
-sauvegarde ne réduit aucun risque et en ajoute un.
+**physique**. Conséquence pratique : la clé de récupération **et le fichier-clé**
+doivent être rangés dans un lieu **physiquement distinct des sauvegardes**. Une clé
+rangée à côté du disque de sauvegarde ne réduit aucun risque et en ajoute un. Le
+programme le rappelle à chaque installation.
 
 ## 9. Ce que ce logiciel ne peut pas garantir
 
@@ -563,6 +602,7 @@ principal** que chaque phase introduit, et où il est traité.
 | 2 | historique conservant des secrets que l'utilisateur croit supprimés ; injection de requête *(écartée en abandonnant SQLite)* | §4.5, L22 |
 | 3 | faiblesse du générateur ; **revendication d'entropie trop généreuse** ; injection de séquences d'échappement par un libellé TOTP ; **le TOTP rangé dans le même coffre n'apporte aucune protection contre la compromission de ce coffre** ; horloge fausse indétectable | §4.6, §4.7, L16–L21, L23 |
 | 4 | **export en clair — fuite massive et délibérée** ; parseurs d'import à fuzzzer ; **presse-papiers comme canal public** ; ramasse-miettes de pièces jointes supprimant des fichiers | L22, T32, `docs/TOTP.md` §8 |
+| 4 *(étape 1, livrée)* | **un slot supplémentaire est un chemin d'entrée de plus** — récupérabilité et résistance au vol varient en sens inverse ; **le fichier-clé n'est pas un facteur matériel** (L26) ; **la durabilité réduite sous Windows** peut laisser une promesse non tenue après coupure (L27) ; un secret affiché sur stdout est redirigeable | §4.8, §8, L26, L27, `docs/AUDIT_PHASE4_1_RECUPERATION.md` |
 | 5 | **faux sentiment de protection** — un centre de sécurité qui rassure sans rien garantir ; regroupement de domaines par eTLD+1 erroné dans certains cas, notamment sur un suffixe absent d'une liste vieillissante (L25) ; `expires_at` est le **seul** élément de la phase qui écrit dans les entrées, et il écrit une donnée fournie par l'utilisateur | à traiter **en phase 5** ; décisions déjà tranchées en `ROADMAP.md` §5.3 et §5.4 |
 | 6 | webview ; IPC ; CSP ; **extension de la durée de vie de la clé en mémoire** par la session déverrouillée | à traiter **en phase 6**, et à documenter ici |
 | 7 | **un audit externe non réalisé alors que le produit se présente comme vérifié** | §Statut, L10 |

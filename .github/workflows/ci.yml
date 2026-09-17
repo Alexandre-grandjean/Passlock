@@ -146,3 +146,21 @@ jobs:
       - name: Fuzzer le décodage de l'enveloppe
         run: cargo +nightly fuzz run payload_decode -- -max_total_time=120 -rss_limit_mb=2048
         working-directory: fuzz
+
+      # NOTE DE CORRECTION. Ce job ne lançait que **trois** des cinq cibles déclarées :
+      # `parse_otpauth` et `decode_base32` existaient depuis la phase 3 sans jamais
+      # tourner en intégration continue. La leçon de la phase 3 était pourtant inverse —
+      # quatre cibles sur six n'avaient jamais été exécutées (SECURITY.md, L12). Toutes
+      # les cibles déclarées sont désormais lancées ici.
+
+      - name: Fuzzer l'analyse des URI otpauth
+        run: cargo +nightly fuzz run parse_otpauth -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz
+
+      - name: Fuzzer le décodage Base32 et Base64url
+        run: cargo +nightly fuzz run decode_base32 -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz
+
+      - name: Fuzzer le décodage des clés de récupération
+        run: cargo +nightly fuzz run parse_recovery_key -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz

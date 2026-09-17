@@ -46,6 +46,7 @@ pub mod migrate;
 pub mod model;
 pub mod payload;
 pub mod query;
+pub mod recovery;
 pub mod rng;
 pub mod rollback;
 pub mod secret;

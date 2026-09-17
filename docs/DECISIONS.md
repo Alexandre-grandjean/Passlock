@@ -888,3 +888,107 @@ précisément ce qui protège le coffre.
 **Voie retenue pour le confort.** L'interface graphique (phase 6) maintiendra une
 session déverrouillée en mémoire avec verrouillage automatique — et non un affaiblissement
 du modèle.
+
+---
+
+## ADR-031 — Un seul chemin de dérivation de KEK pour les trois rôles de slot
+
+**Statut :** accepté, **avec l'option la plus simple consignée comme rejetée**
+
+**Problème.** Trois mécanismes ouvrent désormais un coffre : mot de passe maître, clé de
+récupération transcrite, fichier-clé. Les deux derniers portent **256 bits aléatoires**,
+et non une phrase de faible entropie. Faut-il leur appliquer Argon2id — 256 Mio, t=3,
+p=4, soit ~0,78 s mesurés — alors qu'ils n'ont rien à étirer ?
+
+**Menace réduite.** Aucune, directement. Il s'agit de ne pas **introduire** de faiblesse
+en cherchant à économiser du temps.
+
+**Les trois constructions comparées.**
+
+| | (A) mot de passe → Argon2id → HKDF | (B) 256 bits aléatoires → HKDF | (C) chemin uniforme |
+|---|---|---|---|
+| Force brute | indispensable | **identique à (A)** : 2²⁵⁶ | identique |
+| Matériel de clé plus faible que prévu | protégé | **non protégé** | protégé |
+| Coût | 0,78 s, 256 Mio | négligeable | 0,78 s, une fois, action rare |
+| Déni de service local | plafonné (258 Mio) | aucun | identique à (A) |
+| Complexité | — | **branche par rôle** | **aucune branche** |
+| Risque d'erreur | — | réel : un défaut **silencieux** | le plus faible |
+| Véracité du champ `params` | vraie | **fausse** | vraie |
+
+**Ce qui décide, et ce qui ne décide pas.** Argon2id **ne renforce pas** une clé de
+256 bits aléatoires contre la force brute : le gain de (B) sur ce point est **nul**, pas
+marginal, et (B) est **cryptographiquement suffisant**. Ce n'est donc pas un argument de
+sécurité qui tranche, mais trois autres :
+
+1. **Le champ `params` d'un slot est authentifié** — il entre dans l'AAD du slot, il est
+   affiché par `passlock info` **sans déverrouillage**, et il sert à calculer
+   l'avertissement « paramètres sous la recommandation ». Un slot qui déclarerait
+   Argon2id 256 Mio sur un chemin qui ne l'applique pas porterait un octet authentifié
+   décrivant une dérivation qui n'a pas eu lieu.
+2. **Aucune branche par rôle.** Le rôle ne doit pas décider du chemin : rien ne garantit
+   qu'un matériel de clé futur ait 256 bits d'entropie — un fichier tronqué, comblé, ou
+   une clé fournie par l'utilisateur dans une version ultérieure. Argon2id y est un
+   filet, pas un rituel.
+3. **Le coût est rare et borné** : une fois par déverrouillage, sur une action humaine,
+   sous le limiteur de concurrence en processus.
+
+**Conséquence assumée.** Un déverrouillage par clé de récupération coûte ~0,78 s et
+256 Mio, comme un déverrouillage par mot de passe. `recovery test` et `keyfile test`
+mesurent et affichent la latence observée, comme `calibrate`.
+
+**Ce qui n'est pas affirmé.** Que (B) serait dangereux. Il ne l'est pas. La décision est
+un choix de cohérence, et elle est écrite comme tel.
+
+**Correction de revendication associée.** `SECURITY.md` §8 affirmait que l'ajout et la
+révocation d'un slot sont « en O(1) ». **C'était faux** pour le fichier de coffre : le
+header entre dans l'AAD du payload (ADR-005), donc le prochain enregistrement ré-écrit
+tout le payload. §3.2 le disait correctement depuis la phase 1. Le bénéfice O(1) réel
+porte sur les **blobs de pièces jointes**, pas sur l'archive. L'implémentation le
+documente désormais dans `Vault::install_slot`, et un test établit que le fichier change
+tout en restant ouvrable.
+
+---
+
+## ADR-032 — « Clé matérielle » : un fichier sur support amovible, pas un protocole matériel
+
+**Statut :** accepté, **avec la restriction explicitement nommée**
+
+**Problème.** Le périmètre de la phase 4 demande une « clé matérielle », sans nommer de
+protocole.
+
+**Menace réduite.** T31 (perte totale de l'appareil) : la clé de récupération et la clé
+matérielle couvrent le même besoin par le même chemin de code.
+
+**Décision.** La clé matérielle est un **fichier de 32 octets aléatoires**, écrit à un
+emplacement choisi par l'utilisateur — typiquement un support amovible. C'est
+littéralement « la KEK provenant du support » : la KEK est dérivée du contenu du fichier
+par le même `derive_slot_kek` que les deux autres rôles.
+
+**Pourquoi pas FIDO2 `hmac-secret`.** Un jeton qui ne peut pas être dupliqué est un
+**meilleur** facteur de possession, et c'est précisément ce qu'on abandonne ici. Le coût
+est ailleurs : `hidapi` ou `libusb`, donc **du C compilé**, plus plusieurs crates hors de
+la liste blanche de `deny.toml`, plus une conversation USB HID à implémenter et à
+éprouver. Le projet a construit sa garantie `I12` sur un arbre de dépendances minimal et
+vérifiable ; y introduire une pile USB pour ce gain serait un changement de doctrine, pas
+un ajout de fonctionnalité.
+
+**Conséquence, énoncée sans détour — L26.** **Un fichier-clé est un fichier : il se
+copie.** Ce n'est donc **pas** un facteur de possession inviolable. Une copie ouvre le
+coffre depuis n'importe quelle machine, et rien ne permet de le détecter. L'utilisateur
+en est averti à chaque installation, et le support doit être **physiquement distinct** du
+coffre et des sauvegardes.
+
+**Alternative examinée et écartée.** Signer un défi par une clé privée non extractible
+(PKCS#11, PIV) : cela authentifierait le **support** sans que la clé en sorte, au prix
+d'une dépendance à un pilote et d'un modèle de confiance déplacé vers le fabricant.
+Repoussé pour les mêmes raisons que FIDO2, et non oublié.
+
+**Si mal implémenté.** Le risque propre à ce choix n'est pas cryptographique mais
+**physique** : un fichier-clé rangé à côté du disque de sauvegarde ne réduit aucun risque
+et en ajoute un. Le programme le dit à l'installation, et la documentation le répète.
+
+**Écriture du fichier.** Par `create_private_file` (**création exclusive**, permissions
+restrictives posées à la création, `fsync` puis `fsync` du répertoire parent), et **non**
+par `write_atomic` : celui-ci a une sémantique de **remplacement**, et écraser un
+fichier-clé existant détruirait le seul exemplaire d'une clé peut-être encore installée
+ailleurs.

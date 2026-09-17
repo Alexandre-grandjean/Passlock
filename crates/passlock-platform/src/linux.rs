@@ -140,11 +140,13 @@ pub(crate) fn restrict_ptrace() -> crate::process::HardeningOutcome {
 
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::File;
-use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
+use std::io::{Read, Write};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
+
+use crate::fs::Durability;
 
 /// Convertit un chemin en chaîne C, en refusant les octets nuls.
 ///
@@ -414,6 +416,286 @@ fn libc_remove(dir_fd: RawFd, _target: &CString, temp: &CString) -> io::Result<(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Création, lecture, suppression et durabilité — phase 4.
+//
+// Ces fonctions partagent toutes la même garantie de chemin : le répertoire parent
+// est ouvert par `open_dir_no_symlinks`, donc par une marche qui tient un
+// descripteur à chaque étape et refuse `O_NOFOLLOW` sur chacune. Le nom est ensuite
+// résolu **relativement à ce descripteur**, jamais à partir du chemin complet : un
+// composant ne peut donc pas être remplacé entre la vérification et l'opération.
+// ---------------------------------------------------------------------------
+
+/// Ouvre le répertoire parent et rend `(descripteur, nom, nom_brut)`.
+///
+/// Le descripteur doit rester vivant pendant toute l'opération : il est ce qui
+/// garantit qu'aucun composant du chemin n'a été remplacé.
+fn open_parent_and_name(target: &Path) -> io::Result<(File, CString, OsString)> {
+    let (dir, name) = split_target(target)?;
+    let guard = open_dir_no_symlinks(&dir)?;
+    let name_c = to_cstring(&name, "le nom du fichier")?;
+    Ok((guard, name_c, name))
+}
+
+/// Crée un fichier **neuf**, en mode 0600, sans jamais écraser.
+///
+/// `O_CREAT|O_EXCL` rendent le contrôle d'existence et la création **atomiques** :
+/// il n'existe aucune fenêtre pendant laquelle un autre processus pourrait créer
+/// l'entrée, et aucun pré-contrôle n'est donc nécessaire. `O_NOFOLLOW` refuse un
+/// lien symbolique pré-créé au nom exact de la cible.
+///
+/// Le mode est posé par le noyau **à la création**, ce qui évite toute fenêtre où le
+/// fichier existerait avec les permissions de l'`umask`.
+///
+/// # Erreurs
+/// `AlreadyExists` si la cible existe déjà ; l'erreur du système sinon.
+pub fn create_private_file(target: &Path) -> io::Result<File> {
+    let (dir_guard, name_c, _name) = open_parent_and_name(target)?;
+
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `name_c` est une chaîne C valide et vivante, et `dir_guard` détient un
+    // descripteur de répertoire ouvert pour toute la durée de l'appel. Le mode 0600
+    // est appliqué à la création. Aucun pré-contrôle n'a lieu : `O_EXCL` fait tout.
+    let fd = unsafe { libc::openat(dir_guard.as_raw_fd(), name_c.as_ptr(), flags, 0o600_u32) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` vient d'être retourné par `openat` et n'est détenu par personne.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+/// Crée un répertoire privé (0700) et rend durable son entrée dans le parent.
+///
+/// # Erreurs
+/// `AlreadyExists` si la cible existe déjà ; l'erreur du système sinon.
+pub fn create_dir_private(target: &Path) -> io::Result<Durability> {
+    let (dir_guard, name_c, _name) = open_parent_and_name(target)?;
+    // SAFETY: `name_c` est valide et vivante ; `dir_guard` détient le descripteur du
+    // parent. `mkdirat` échoue si l'entrée existe, ce qui évite d'adopter un
+    // répertoire pré-créé par un tiers.
+    if unsafe { libc::mkdirat(dir_guard.as_raw_fd(), name_c.as_ptr(), 0o700_u32) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Sans `fsync` du parent, la création du répertoire n'est pas durable : après une
+    // coupure, l'entrée peut manquer alors que les fichiers qu'elle contient, eux,
+    // sont durablement écrits — ils deviendraient inatteignables.
+    if unsafe { libc::fsync(dir_guard.as_raw_fd()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Durability::DirectoryEntrySynced)
+}
+
+/// Supprime un fichier, sans suivre de lien symbolique.
+///
+/// `unlinkat` **sans** `AT_REMOVEDIR` refuse un répertoire : une cible qui serait un
+/// répertoire n'est donc jamais supprimée par erreur.
+///
+/// Aucune synchronisation du parent : après une coupure, l'entrée peut réapparaître,
+/// ce qui produit un **orphelin** — inoffensif — et non une donnée manquante.
+pub fn remove_file(target: &Path) -> io::Result<()> {
+    let (dir_guard, name_c, _name) = open_parent_and_name(target)?;
+    // SAFETY: `name_c` est valide et vivante ; `dir_guard` détient le descripteur du
+    // parent, donc l'entrée visée est bien celle du répertoire vérifié.
+    if unsafe { libc::unlinkat(dir_guard.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Supprime un répertoire **vide**.
+///
+/// `AT_REMOVEDIR` refuse un répertoire non vide : on ne peut donc pas effacer par
+/// accident un répertoire qui contient encore quelque chose.
+pub fn remove_dir(target: &Path) -> io::Result<()> {
+    let (dir_guard, name_c, _name) = open_parent_and_name(target)?;
+    // SAFETY: identique à `remove_file` ; `AT_REMOVEDIR` restreint l'opération aux
+    // répertoires, et le noyau refuse un répertoire non vide.
+    if unsafe { libc::unlinkat(dir_guard.as_raw_fd(), name_c.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Liste les noms des entrées d'un répertoire, lu sur le descripteur vérifié.
+///
+/// # Limite assumée
+///
+/// `readdir` ne distingue pas une erreur de lecture de la fin de l'énumération :
+/// l'erreur n'est donc pas remontée. La conséquence est une liste **tronquée**, donc
+/// plus courte que la réalité — et pour un ramasse-miettes qui supprime « ce qui est
+/// présent et non référencé », cela signifie **moins** de suppressions. Le mode de
+/// défaillance va dans le sens sûr, ce qui rend la limite acceptable ici.
+pub fn list_dir(target: &Path) -> io::Result<Vec<OsString>> {
+    let dir_guard = open_dir_no_symlinks(target)?;
+
+    // `fdopendir` prend possession du descripteur et `closedir` le fermera : on lui
+    // donne donc un `dup`, pour que le `File` garde le sien.
+    // SAFETY: `dir_guard` détient un descripteur ouvert.
+    let duplicated = unsafe { libc::dup(dir_guard.as_raw_fd()) };
+    if duplicated < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `duplicated` est un descripteur de répertoire ouvert dont personne
+    // d'autre ne détient la propriété.
+    let stream = unsafe { libc::fdopendir(duplicated) };
+    if stream.is_null() {
+        let err = io::Error::last_os_error();
+        // SAFETY: `duplicated` n'a pas été adopté par `fdopendir`, qui a échoué.
+        unsafe { libc::close(duplicated) };
+        return Err(err);
+    }
+
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `stream` est un flux de répertoire ouvert.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: `readdir` a rempli `d_name`, qui est un tableau d'octets terminé
+        // par un nul et vit aussi longtemps que l'entrée du flux.
+        let raw = unsafe { (*entry).d_name.as_ptr() };
+        // SAFETY: `raw` est une chaîne C valide terminée par un nul.
+        let name = unsafe { std::ffi::CStr::from_ptr(raw) }.to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        names.push(OsString::from_vec(name.to_vec()));
+    }
+    // SAFETY: `stream` a été retourné par `fdopendir` et n'est pas utilisé ensuite ;
+    // `closedir` ferme aussi le descripteur dupliqué.
+    unsafe { libc::closedir(stream) };
+
+    Ok(names)
+}
+
+/// Ouvre un fichier ordinaire en lecture seule, sans suivre de lien symbolique.
+///
+/// Tout ce qui n'est pas un fichier ordinaire est refusé : lire un FIFO bloquerait
+/// indéfiniment, et un répertoire n'a pas de contenu à lire.
+pub fn open_read(target: &Path) -> io::Result<File> {
+    let (dir_guard, name_c, _name) = open_parent_and_name(target)?;
+    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `name_c` est valide et vivante ; `dir_guard` détient le parent.
+    let fd = unsafe { libc::openat(dir_guard.as_raw_fd(), name_c.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` vient d'être retourné par `openat` et n'est détenu par personne.
+    let file = unsafe { File::from_raw_fd(fd) };
+
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "la cible n'est pas un fichier ordinaire",
+        ));
+    }
+    Ok(file)
+}
+
+/// Lit un fichier entier, en refusant de dépasser `max_len` octets.
+///
+/// La borne est appliquée **pendant** la lecture, jamais déduite d'une taille
+/// annoncée par le fichier : un fichier qui grossirait entre l'ouverture et la lecture
+/// est donc arrêté net, et non suivi.
+///
+/// # Erreurs
+/// `InvalidData` si le contenu dépasse `max_len`.
+pub fn read_file(target: &Path, max_len: usize) -> io::Result<Vec<u8>> {
+    let mut file = open_read(target)?;
+
+    // Un octet de plus que la borne suffit à constater un dépassement.
+    let limit = u64::try_from(max_len).unwrap_or(u64::MAX).saturating_add(1);
+    let mut buffer = Vec::new();
+    let mut limited = (&mut file).take(limit);
+    limited.read_to_end(&mut buffer)?;
+
+    if buffer.len() > max_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("le fichier dépasse la taille maximale de {max_len} octets"),
+        ));
+    }
+    Ok(buffer)
+}
+
+/// Vrai si l'entrée existe, **sans la suivre**.
+///
+/// Un lien symbolique existant compte comme existant : c'est bien l'entrée de
+/// répertoire qui est observée, pas sa cible.
+///
+/// # Usage
+/// Énumération et rapport uniquement — jamais comme garde avant une création.
+#[must_use]
+pub fn path_exists(target: &Path) -> bool {
+    let Ok((dir_guard, name_c, _name)) = open_parent_and_name(target) else {
+        return false;
+    };
+    // SAFETY: `stat_buf` est une zone allouée et inscriptible de la taille attendue.
+    let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `name_c` est valide et vivante ; `dir_guard` détient le parent ;
+    // `stat_buf` est valide pour écriture. `AT_SYMLINK_NOFOLLOW` empêche de suivre un
+    // lien : l'entrée elle-même est examinée.
+    let rc = unsafe {
+        libc::fstatat(
+            dir_guard.as_raw_fd(),
+            name_c.as_ptr(),
+            &raw mut stat_buf,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    rc == 0
+}
+
+/// `fsync` du fichier : le contenu devient durable.
+fn sync_file(file: &File) -> io::Result<()> {
+    // SAFETY: `file` détient un descripteur ouvert.
+    if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `fsync` du répertoire : **l'entrée de répertoire** devient durable.
+///
+/// C'est l'opération que `write_atomic` exécute déjà après son `renameat`. Elle est
+/// extraite sous un nom parce que le même besoin apparaît hors de `write_atomic` :
+/// `fsync` d'un fichier ne rend pas durable le **nom** qui le désigne, et une coupure
+/// peut donc perdre l'entrée tout en conservant le contenu.
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    let dir_guard = open_dir_no_symlinks(dir)?;
+    // SAFETY: `dir_guard` détient un descripteur de répertoire ouvert ; `fsync` sur un
+    // répertoire est valide sous Linux et synchronise ses entrées.
+    if unsafe { libc::fsync(dir_guard.as_raw_fd()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Rend durable ce qui vient d'être écrit dans `dir`.
+///
+/// Sous Unix, le contenu **et** le nom le deviennent : `fsync` du fichier, puis
+/// `fsync` du répertoire parent. Le niveau retourné est toujours
+/// [`Durability::DirectoryEntrySynced`].
+///
+/// # Erreurs
+/// Toute erreur réelle du système. L'absence de capacité, elle, n'est pas une erreur :
+/// c'est pourquoi cette fonction ne rend pas `Unsupported` — voir [`Durability`].
+pub fn make_durable(file: &File, dir: &Path) -> io::Result<Durability> {
+    sync_file(file)?;
+    sync_dir(dir)?;
+    Ok(Durability::DirectoryEntrySynced)
+}
+
+/// Sous Unix, la synchronisation de l'entrée de répertoire est disponible.
+///
+/// Un test vérifie que cette déclaration et ce que [`make_durable`] retourne
+/// réellement ne peuvent pas diverger.
+pub(crate) const fn platform_durability() -> Durability {
+    Durability::DirectoryEntrySynced
+}
+
 /// Verrou exclusif sur un coffre.
 ///
 /// Le champ `file` n'est jamais lu directement : il est conservé pour que le
@@ -617,5 +899,49 @@ impl Drop for EchoGuard {
         unsafe {
             libc::tcsetattr(self.fd, libc::TCSAFLUSH, &raw const self.original);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests unitaires des primitives **privées** de durabilité.
+    //!
+    //! `sync_file` et `sync_dir` ne sont pas publiques : elles sont des détails
+    //! d'implémentation de `make_durable`. Un test d'intégration ne peut donc pas les
+    //! atteindre, et c'est voulu — c'est ce qui rend impossible le scénario
+    //! « `sync_dir` rend `Unsupported`, on ignore l'erreur ». Les éprouver
+    //! directement demande donc un test unitaire, ici même.
+
+    use super::{sync_dir, sync_file};
+    use std::fs::File;
+    use std::io::Write as _;
+
+    #[test]
+    fn sync_file_succeeds_on_an_open_file() {
+        let dir = tempfile::tempdir().expect("répertoire temporaire");
+        let path = dir.path().join("fichier");
+        let mut file = File::create(&path).expect("création");
+        file.write_all(b"contenu").expect("écriture");
+
+        sync_file(&file).expect("fsync d'un fichier ouvert");
+    }
+
+    #[test]
+    fn sync_dir_succeeds_on_a_directory() {
+        let dir = tempfile::tempdir().expect("répertoire temporaire");
+
+        sync_dir(dir.path()).expect("fsync d'un descripteur de répertoire");
+    }
+
+    #[test]
+    fn sync_dir_refuses_a_path_that_is_not_a_directory() {
+        let dir = tempfile::tempdir().expect("répertoire temporaire");
+        let path = dir.path().join("fichier");
+        File::create(&path).expect("création");
+
+        assert!(
+            sync_dir(&path).is_err(),
+            "un fichier n'est pas un répertoire : l'ouverture doit échouer"
+        );
     }
 }

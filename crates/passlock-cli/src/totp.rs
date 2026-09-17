@@ -248,7 +248,7 @@ pub(crate) fn entry_gen_command() -> Command {
 /// `passlock totp`.
 pub(crate) fn cmd_totp(
     matches: &ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;
@@ -454,7 +454,7 @@ fn apply_offset(now: u64, offset: i64) -> u64 {
 /// `passlock entry totp`.
 pub(crate) fn cmd_entry_totp(
     matches: &ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let (sub, arguments) = matches
@@ -471,7 +471,7 @@ pub(crate) fn cmd_entry_totp(
 }
 
 /// `passlock entry totp set`.
-fn cmd_totp_set(matches: &ArgMatches, options: GlobalOptions, config: &VaultConfig) -> CliResult {
+fn cmd_totp_set(matches: &ArgMatches, options: &GlobalOptions, config: &VaultConfig) -> CliResult {
     let path = vault_path(matches)?;
     let mut store = open_store(&path, options, config)?;
 
@@ -520,7 +520,7 @@ fn cmd_totp_set(matches: &ArgMatches, options: GlobalOptions, config: &VaultConf
 }
 
 /// `passlock entry totp new`.
-fn cmd_totp_new(matches: &ArgMatches, options: GlobalOptions, config: &VaultConfig) -> CliResult {
+fn cmd_totp_new(matches: &ArgMatches, options: &GlobalOptions, config: &VaultConfig) -> CliResult {
     let path = vault_path(matches)?;
     let mut store = open_store(&path, options, config)?;
 
@@ -582,7 +582,7 @@ fn store_totp(
 /// `passlock entry gen`.
 pub(crate) fn cmd_entry_gen(
     matches: &ArgMatches,
-    options: GlobalOptions,
+    options: &GlobalOptions,
     config: &VaultConfig,
 ) -> CliResult {
     let path = vault_path(matches)?;

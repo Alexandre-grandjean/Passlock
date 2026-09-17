@@ -34,7 +34,7 @@ Un seul document définit le contenu d'une phase : celui-ci. Les autres s'y réf
 | **1** | Moteur cryptographique et conteneur | **Terminée et gelée** |
 | **2** | Modèle de données et cœur de stockage | **Terminée et gelée** |
 | **3** | Générateur de secrets et TOTP | **Terminée et approuvée** |
-| **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **Non commencée** |
+| **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **En cours** — étape 1 sur 5 close |
 | **5** | Centre de sécurité et analyse d'URL | **Non commencée** |
 | **6** | Interface graphique | **Non commencée** |
 | **7** | Durcissement, audit et livrables de release | **Non commencée** |
@@ -255,7 +255,16 @@ le presse-papiers, ou vers un blob séparé.
 
 **État**
 
-- **Non commencée.** Aucune ligne écrite.
+- **En cours.** Le périmètre est exécuté en cinq étapes, chacune close par un audit
+  adversarial séparé.
+- **Étape 1 — récupération : close et auditée**
+  (`docs/AUDIT_PHASE4_1_RECUPERATION.md`). Livrés : clé de récupération de 256 bits en
+  Crockford Base32 avec total de contrôle, **fichier-clé** sur support amovible par le
+  même chemin de code, slots supplémentaires (installation, remplacement, révocation),
+  et le socle transverse de création exclusive et de durabilité des fichiers sensibles.
+  **Aucun changement de format** : le rôle de slot 2 était réservé depuis la phase 1.
+- **Restent : étapes 2 à 5** — pièces jointes, sauvegardes et test de restauration,
+  import/export, presse-papiers.
 - C'est la **plus large** des phases restantes : cinq chantiers indépendants.
 
 ---

@@ -26,6 +26,7 @@
 //!   et il ne faut pas en ajouter.
 
 mod attachment;
+mod backup;
 mod generate;
 mod recovery;
 mod totp;
@@ -209,6 +210,7 @@ pub(crate) fn config_from(matches: &clap::ArgMatches) -> VaultConfig {
         params: KdfParams::standard(),
         read_only: matches.get_flag("read-only"),
         state_dir: matches.get_one::<String>("state-dir").map(PathBuf::from),
+        ..VaultConfig::default()
     }
 }
 
@@ -232,6 +234,7 @@ fn run(hardening: passlock_platform::process::ProcessHardening) -> CliResult {
         Some(("search", sub)) => cmd_search(sub, &options, &config),
         Some(("history", sub)) => cmd_history(sub, &options, &config),
         Some(("attach", sub)) => attachment::cmd_attachment(sub, &options, &config),
+        Some(("backup", sub)) => backup::cmd_backup(sub, &options, &config),
         Some(("recovery", sub)) => recovery::cmd_recovery(sub, &options, &config),
         Some(("keyfile", sub)) => recovery::cmd_keyfile(sub, &options, &config),
         Some(("generate", sub)) => generate::cmd_generate(sub),
@@ -622,6 +625,7 @@ fn build_command() -> Command {
                 ),
         )
         .subcommand(attachment::command())
+        .subcommand(backup::command())
         .subcommand(recovery::recovery_command())
         .subcommand(recovery::keyfile_command())
         .subcommand(generate::generate_command())

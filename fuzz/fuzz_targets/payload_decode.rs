@@ -30,11 +30,14 @@ fuzz_target!(|data: &[u8]| {
     // Ré-encodage fidèle : ni octet manquant, ni octet excédentaire accepté.
     let encoded = payload
         .encode()
-        .expect("un payload décodé doit pouvoir être ré-encodé");
-    assert_eq!(
-        encoded, data,
-        "le payload ré-encodé diffère de l'entrée décodée"
-    );
+        .expect("un payload décodé doit pouvoir être re-encodé");
+    // NOTE DE CORRECTION. Cette ligne comparait `Zeroizing<Vec<u8>>` à `&[u8]` : elle ne
+    // compilait pas. La cible portait donc **zéro couverture depuis la phase 2**, tout en
+    // figurant au manifeste — et personne ne l'a vu, parce qu'aucune exécution ne l'avait
+    // atteinte. C'est le défaut que l'étape 3 met au jour en exécutant enfin les cibles
+    // déclarées.
+    assert_eq!(&encoded[..], data, "le payload ré-encodé diffère de l'entrée décodée");
+
 
     // La génération doit rester dans les bornes admises : un compteur qui
     // déborderait permettrait de masquer un retour en arrière en repartant de zéro.

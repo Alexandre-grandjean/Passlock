@@ -47,6 +47,8 @@ fn config(state: &Path) -> VaultConfig {
         params: params(),
         read_only: false,
         state_dir: Some(state.to_path_buf()),
+
+        ..VaultConfig::default()
     }
 }
 

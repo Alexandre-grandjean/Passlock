@@ -135,6 +135,20 @@ jobs:
       - name: Installer cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
+      # GARDE, et non redondance. `cargo fuzz run` construit la cible qu'il exécute :
+      # il ne prouve donc l'existence des autres qu'à l'endroit où elles sont lancées.
+      # La cible `payload_decode` a été **trouvée cassée** à l'étape 3 — elle comparait
+      # `Zeroizing<Vec<u8>>` à `&[u8]` — et elle l'était depuis la phase 2, sans que rien
+      # ne le signale : elle figurait au manifeste **et** dans ce fichier, mais aucune
+      # exécution n'avait eu lieu. Déclarer n'est pas exécuter.
+      #
+      # Cette étape construit **toutes** les cibles d'un coup : une cible qui ne compile
+      # pas échoue ici, en quelques secondes, au lieu de porter silencieusement une
+      # couverture nulle.
+      - name: Construire toutes les cibles de fuzzing
+        run: cargo +nightly fuzz build
+        working-directory: fuzz
+
       - name: Fuzzer l'analyse du conteneur
         run: cargo +nightly fuzz run vault_parse -- -max_total_time=120 -rss_limit_mb=2048
         working-directory: fuzz

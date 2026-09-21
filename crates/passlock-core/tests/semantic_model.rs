@@ -54,6 +54,8 @@ fn config(state: &Path) -> VaultConfig {
         params: KdfParams::new(MIN_M_COST_KIB, 1, 1).expect("paramètres valides"),
         read_only: false,
         state_dir: Some(state.to_path_buf()),
+
+        ..VaultConfig::default()
     }
 }
 

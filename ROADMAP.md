@@ -34,7 +34,7 @@ Un seul document définit le contenu d'une phase : celui-ci. Les autres s'y réf
 | **1** | Moteur cryptographique et conteneur | **Terminée et gelée** |
 | **2** | Modèle de données et cœur de stockage | **Terminée et gelée** |
 | **3** | Générateur de secrets et TOTP | **Terminée et approuvée** |
-| **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **En cours** — étapes 1 et 2 sur 5 closes |
+| **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **En cours** — étapes 1 à 3 sur 5 closes |
 | **5** | Centre de sécurité et analyse d'URL | **Non commencée** |
 | **6** | Interface graphique | **Non commencée** |
 | **7** | Durcissement, audit et livrables de release | **Non commencée** |
@@ -270,8 +270,14 @@ le presse-papiers, ou vers un blob séparé.
   usage —, commandes `attach add|list|get|verify|rm|gc`, et un ramasse-miettes qui
   distingue orphelins, fichiers étrangers et absences. **Aucun changement de format de
   coffre** : la section des pièces jointes existait depuis la phase 2.
-- **Restent : étapes 3 à 5** — sauvegardes et test de restauration, import/export,
-  presse-papiers.
+- **Étape 3 — sauvegardes : close et auditée** (`docs/AUDIT_PHASE4_3_SAUVEGARDES.md`,
+  procédure dans `docs/BACKUP.md`). Livrés : sauvegarde en **couple de chemins** — le
+  fichier de coffre et son répertoire de blobs, **sans format nouveau** —, copie sous
+  **verrou exclusif** de l'ensemble, vérification **immédiate** de la copie, et un test de
+  restauration **effectif** qui rejoue la procédure documentée et relit une pièce jointe
+  **octet pour octet**. **Aucune atomicité de destination revendiquée** : une interruption
+  brutale laisse une destination partielle, qui **échoue** au test.
+- **Restent : étapes 4 et 5** — import/export, presse-papiers.
 - C'est la **plus large** des phases restantes : cinq chantiers indépendants.
 
 ---

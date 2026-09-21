@@ -33,6 +33,7 @@
 pub mod aead;
 pub mod archive;
 pub mod attachment;
+pub mod backup;
 mod bytes;
 pub mod container;
 pub mod encoding;

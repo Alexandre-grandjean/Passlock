@@ -1093,3 +1093,75 @@ l'effet d'un outil de maintenance.
 **Collision de nom.** Le nom est tronqué à 128 bits : une collision est improbable, jamais
 impossible. `O_EXCL` / `CREATE_NEW` est la garantie ultime — la création **échoue** au lieu
 d'écraser, et un nouvel identifiant est tiré.
+
+---
+
+## ADR-035 — Sauvegarde : un couple de chemins, et aucune atomicité revendiquée
+
+**Statut :** accepté, **avec une limite nommée**
+
+**Problème.** Comment sauvegarder un coffre qui n'est plus un fichier, mais un **ensemble**
+{conteneur, blobs} — sans introduire un nouveau format, et sans promettre une atomicité
+qu'on ne peut pas tenir ?
+
+**Décision.** Une sauvegarde est **un couple de chemins** :
+
+```
+<DESTINATION>                 le fichier de coffre, tel quel
+<DESTINATION>.attachments/    les blobs des pièces jointes référencées
+```
+
+**Aucun format nouveau, aucune archive, aucun manifeste.** Le fichier produit *est* un
+coffre : `info`, `verify`, `attach list` et `attach verify` l'ouvrent sans une ligne de
+code supplémentaire.
+
+**Pourquoi pas une archive unique.** Elle exigerait une dépendance (`zip`, `tar`,
+`flate2` absents de l'arbre), ou un conteneur maison — c'est-à-dire un **nouveau format
+cryptographique**, avec sa surface d'attaque et son audit à refaire. Le produit entier
+repose sur « un format, documenté octet par octet, sans parseur ». Y ajouter un second
+conteneur au moment précis où l'on manque de recul serait le pire moment.
+
+**Pourquoi pas de manifeste.** Ce serait un **second état**, susceptible de diverger du
+contenu réel. Le projet refuse déjà les digestes globaux pour cette raison (ADR-022) :
+l'intégrité se vérifie en **déchiffrant**, pas en comparant un résumé.
+
+**Le verrou exclique, et pourquoi il apparaît à cette étape.** Une ouverture en lecture
+seule ne prenait aucun verrou : c'est correct pour **un** fichier, dont l'écriture est
+atomique. Cela ne l'est plus pour un **ensemble** — un écrivain concurrent pourrait ajouter
+une pièce jointe entre la copie du coffre et celle des blobs, et la sauvegarde
+contiendrait un coffre référençant un blob absent. `VaultConfig::require_exclusive_lock`
+ajoute le verrou **sans retirer** la lecture seule.
+
+**Ce qui n'est PAS revendiqué : l'atomicité de destination.** Les deux chemins sont écrits
+**en place**, pas dans un couple temporaire + renommage. C'est le prix de `O_EXCL`, qui
+ferme toute fenêtre entre le contrôle d'existence et la création — le même arbitrage qu'à
+l'étape 1 pour le fichier-clé, et pour la même raison : un écrasement silencieux est pire
+qu'un refus.
+
+**Trois issues, dont deux seulement sont des garanties :**
+
+| Issue | Ce qui est garanti |
+|---|---|
+| **Succès** | la paire est présente, complète et **vérifiée** |
+| **Erreur contrôlée** | ce qui a été créé est retiré — et **rien d'autre** |
+| **Interruption brutale** | **aucune garantie.** Une destination partielle peut subsister |
+
+**Le nettoyage s'appuie sur un fait, pas sur une intention.** `Created` n'enregistre que
+les créations **effectivement réussies** : un `AlreadyExists` signifie que l'objet
+existait déjà, donc qu'il n'est pas à nous. Nettoyer d'après le **plan** aurait retiré un
+répertoire d'autrui — c'est le défaut D4 de l'audit de l'étape 3.
+
+**Une destination partielle échoue à la vérification.** C'est ce qui distingue une
+sauvegarde d'un fichier quelconque : la troncature est **détectée**, et le reliquat doit
+être supprimé **explicitement** — écraser en silence serait pire que refuser.
+
+**Intégrité et ancienneté sont deux verdicts séparés.** Le retour en arrière (T14) se
+**détecte** par la sentinelle, mais peut aussi se **légitimer** par une restauration. Les
+confondre ferait apprendre à ignorer l'alerte ; taire l'ancienneté ferait perdre la seule
+détection disponible.
+
+**Aucune commande de restauration.** Restaurer écrase un coffre vivant : c'est précisément
+l'opération qu'il ne faut pas pouvoir déclencher par une faute de frappe. La procédure est
+**documentée** (`docs/BACKUP.md` §4) et **rappelée** par `backup verify`, avec les deux
+chemins exacts. Le test de restauration, lui, est **effectif** : il rejoue la procédure
+documentée et relit une pièce jointe **octet pour octet**.

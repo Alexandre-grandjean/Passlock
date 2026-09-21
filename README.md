@@ -7,18 +7,17 @@ mécanisme de récupération à distance, aucune télémétrie, aucune synchroni
 propriétaire — et ces absences sont des choix de conception, pas des
 fonctionnalités manquantes.
 
-> **Statut : phases 0 à 3 terminées et approuvées. Phase 4 en cours — étapes 1 et 2 sur 5 closes.**
+> **Statut : phases 0 à 3 terminées et approuvées. Phase 4 en cours — étapes 1 à 3 sur 5 closes.**
 >
 > Existent et sont testés : le moteur cryptographique et le format de coffre
 > (phase 1), le cœur de stockage — modèle de données, archive, migration, recherche,
 > historique, corbeille (phase 2), le générateur de secrets avec le TOTP (phase 3),
-> la **récupération** — clé de récupération et fichier-clé — et les **pièces jointes**
-> chiffrées (phase 4, étapes 1 et 2 sur 5).
+> la **récupération** — clé de récupération et fichier-clé —, les **pièces jointes**
+> chiffrées et les **sauvegardes** avec test de restauration (phase 4, étapes 1 à 3 sur 5).
 >
-> N'existent **pas encore** : sauvegardes, test de restauration, import/export et
-> presse-papiers *(phase 4, étapes 3 à 5)* ; centre de sécurité et analyse d'URL
-> *(phase 5)* ; interface graphique *(phase 6)* ; audit externe, SBOM et build
-> reproductible *(phase 7)*.
+> N'existent **pas encore** : import/export et presse-papiers *(phase 4, étapes 4 et 5)* ;
+> centre de sécurité et analyse d'URL *(phase 5)* ; interface graphique *(phase 6)* ;
+> audit externe, SBOM et build reproductible *(phase 7)*.
 >
 > Le contenu des phases fait autorité dans **[`ROADMAP.md`](ROADMAP.md)**.
 
@@ -51,6 +50,8 @@ fonctionnalités manquantes.
   essayée n'est pas une récupération.
 * **Attacher des fichiers** à une entrée, chiffrés séparément du coffre, et les restituer.
 * **Vérifier l'intégrité des pièces jointes** et supprimer les blobs devenus orphelins.
+* **Sauvegarder** un coffre et ses pièces jointes, et **tester la sauvegarde** — en
+  déchiffrant réellement son contenu.
 
 ## Ce que ce logiciel ne fait pas — et ne fera pas
 
@@ -252,6 +253,8 @@ techniquement ni juridiquement.
 | [`docs/AUDIT_PHASE4_1_RECUPERATION.md`](docs/AUDIT_PHASE4_1_RECUPERATION.md) | **Audit de la phase 4, étape 1** : clé de récupération, fichier-clé, création exclusive et durabilité, défaut de perte de données trouvé |
 | [`docs/ATTACHMENT_FORMAT.md`](docs/ATTACHMENT_FORMAT.md) | Le **format des pièces jointes** octet par octet : découpage, AAD, ce que l'AEAD ne protège **pas**, ordre d'écriture, ramasse-miettes |
 | [`docs/AUDIT_PHASE4_2_PIECES_JOINTES.md`](docs/AUDIT_PHASE4_2_PIECES_JOINTES.md) | **Audit de la phase 4, étape 2** : domaines de clés, format de blob, ramasse-miettes, oracle faux trouvé par le fuzzing |
+| [`docs/BACKUP.md`](docs/BACKUP.md) | **Sauvegardes et restauration** : ce qu'est un couple de chemins, pourquoi aucune atomicité n'est revendiquée, la procédure de restauration |
+| [`docs/AUDIT_PHASE4_3_SAUVEGARDES.md`](docs/AUDIT_PHASE4_3_SAUVEGARDES.md) | **Audit de la phase 4, étape 3** : verrou de l'ensemble, nettoyage des créations, et une cible de fuzzing morte depuis la phase 2 |
 | [`docs/AUDIT_PHASE3.md`](docs/AUDIT_PHASE3.md) | Audit adversarial du générateur et du TOTP : 35 vecteurs RFC, fuzzing, secret en mémoire, défauts trouvés |
 | [`docs/AUDIT_PHASE2_SEMANTIQUE.md`](docs/AUDIT_PHASE2_SEMANTIQUE.md) | **Audit sémantique** du magasin par modèle de référence : 9 500 opérations comparées, 18 invariants |
 | [`docs/AUDIT_PHASE2.md`](docs/AUDIT_PHASE2.md) | Audit adversarial du cœur de stockage |
@@ -262,7 +265,7 @@ techniquement ni juridiquement.
 Les affirmations de sécurité de ce projet sont vérifiables :
 
 ```sh
-cargo test --workspace          # 556 tests, dont 27 attaques adversariales et 9 500
+cargo test --workspace          # 569 tests, dont 27 attaques adversariales et 9 500
                                 # opérations comparées à un modèle de référence
 cargo deny check                # avis de sécurité, licences, bans, sources
 
@@ -305,6 +308,15 @@ passlock attach gc COFFRE --confirm "$VAULT_ID"         # supprime les seuls orp
 truncate -s -100 COFFRE.attachments/<blob>
 passlock attach verify COFFRE    # → défaut signalé, et le blob est PRÉSERVÉ
 
+# Sauvegarder, puis tester la sauvegarde — c'est le test qui compte
+passlock backup create COFFRE sauvegardes/2026-09-17.plk
+passlock backup verify sauvegardes/2026-09-17.plk   # déchiffre CHAQUE pièce jointe
+# Aucun effet persistant : pas de verrou, pas de sentinelle, pas de permission réparée.
+
+# Restaurer : deux copies, jamais une seule
+#   cp    sauvegardes/2026-09-17.plk             coffre.plk
+#   cp -a sauvegardes/2026-09-17.plk.attachments coffre.plk.attachments
+
 # Le fuzzing, cible par cible (nightly requis)
 cd fuzz && cargo +nightly fuzz run parse_recovery_key --  -max_total_time=60
 cd fuzz && cargo +nightly fuzz run parse_attachment_blob -- -max_total_time=60
@@ -323,6 +335,12 @@ trouvé, et ce qui reste **non vérifié**.
 * **Phase 2** — [`docs/AUDIT_PHASE2.md`](docs/AUDIT_PHASE2.md) et
   [`docs/AUDIT_PHASE2_SEMANTIQUE.md`](docs/AUDIT_PHASE2_SEMANTIQUE.md).
 * **Phase 3** — [`docs/AUDIT_PHASE3.md`](docs/AUDIT_PHASE3.md).
+* **Phase 4, étape 3 — sauvegardes** —
+  [`docs/AUDIT_PHASE4_3_SAUVEGARDES.md`](docs/AUDIT_PHASE4_3_SAUVEGARDES.md) : deux défauts
+  trouvés **hors du chemin nominal** — un nettoyage qui retirait un répertoire **d'autrui**,
+  et une cible de fuzzing qui **ne compilait pas** depuis la phase 2. Elle figurait pourtant
+  dans le fichier d'intégration continue, qui n'a jamais tourné. **Déclarer n'est pas
+  exécuter.**
 * **Phase 4, étape 2 — pièces jointes** —
   [`docs/AUDIT_PHASE4_2_PIECES_JOINTES.md`](docs/AUDIT_PHASE4_2_PIECES_JOINTES.md) :
   **40,5 millions** d'exécutions de fuzzing, et **un défaut trouvé** — non dans le produit,

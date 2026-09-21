@@ -75,6 +75,23 @@ pub struct VaultConfig {
     /// emplacement explicite est utile aux tests et aux usages avancés (coffre sur
     /// support amovible, sentinelle volontairement placée sur un autre volume).
     pub state_dir: Option<PathBuf>,
+
+    /// Prendre le **verrou exclusif même en lecture seule**.
+    ///
+    /// # Pourquoi ce champ existe
+    ///
+    /// Une ouverture en lecture seule ne prend normalement aucun verrou : l'écriture du
+    /// conteneur étant atomique, un lecteur voit toujours un fichier complet, soit
+    /// l'ancien, soit le nouveau. C'est vrai pour **un fichier**.
+    ///
+    /// Ce ne l'est plus pour un **ensemble** de fichiers. Une sauvegarde copie le coffre
+    /// **et** ses blobs : entre les deux lectures, un écrivain concurrent peut ajouter
+    /// une pièce jointe, et la copie contiendrait alors un coffre référençant un blob
+    /// absent. Le verrou est ce qui gèle l'ensemble pendant la copie.
+    ///
+    /// Ce champ ne change **pas** `read_only` : l'ouverture reste sans écriture possible.
+    /// Il ajoute une garantie, il n'en retire aucune.
+    pub require_exclusive_lock: bool,
 }
 
 /// Observations faites à l'ouverture, à communiquer à l'utilisateur.
@@ -502,9 +519,16 @@ impl Vault {
         credentials: &Credentials<'_>,
         config: &VaultConfig,
     ) -> Result<Self> {
-        let file_lock = if config.read_only {
-            None
-        } else {
+        // Le verrou est pris dès qu'une écriture est possible — **ou** quand l'appelant
+        // le demande explicitement. Le second cas sert à la sauvegarde : elle ouvre en
+        // lecture seule, donc sans écriture possible, mais elle doit geler l'ensemble
+        // {coffre, blobs} pendant qu'elle le copie.
+        //
+        // NOTE DE CORRECTION. Une version antérieure écrivait `if config.read_only
+        // { None } else { ... }`, ce qui rendait `--read-only backup create` capable de
+        // copier **sans aucun verrou** : exactement la fenêtre que ce champ ferme.
+        let needs_lock = !config.read_only || config.require_exclusive_lock;
+        let file_lock = if needs_lock {
             Some(FileLock::acquire(path).map_err(|err| {
                 if err.kind() == std::io::ErrorKind::WouldBlock {
                     Error::AlreadyLocked
@@ -512,6 +536,8 @@ impl Vault {
                     Error::Io(err)
                 }
             })?)
+        } else {
+            None
         };
 
         let bytes = read_vault_file(path)?;
@@ -1196,6 +1222,8 @@ mod tests {
             params: test_params(),
             read_only: false,
             state_dir: Some(dir.to_path_buf()),
+
+            ..VaultConfig::default()
         }
     }
 

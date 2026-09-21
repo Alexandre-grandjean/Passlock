@@ -6,7 +6,7 @@
 
 ## Statut du projet
 
-**Phases 0 à 3 terminées et approuvées. Phase 4 en cours — étapes 1 et 2 sur 5 closes.**
+**Phases 0 à 3 terminées et approuvées. Phase 4 en cours — étapes 1 à 3 sur 5 closes.**
 
 Ce qui existe et est testé : dérivation de clés, chiffrement authentifié, hiérarchie
 de clés, conteneur et son format, écriture atomique, verrouillage, sentinelle
@@ -15,9 +15,9 @@ historique, corbeille, recherche, migration ; générateur de mots de passe, de 
 de passe et de secrets arbitraires ; HOTP et TOTP avec analyse des URI
 `otpauth://` ; interface en ligne de commande headless.
 
-Ce qui n'existe **pas encore** : sauvegardes, test de restauration, import/export,
-presse-papiers *(phase 4, étapes 3 à 5)* ; centre de sécurité et analyse d'URL *(phase 5)* ;
-interface graphique *(phase 6)* ; audit externe, SBOM, build reproductible *(phase 7)*.
+Ce qui n'existe **pas encore** : import/export, presse-papiers *(phase 4, étapes 4 et 5)* ;
+centre de sécurité et analyse d'URL *(phase 5)* ; interface graphique *(phase 6)* ; audit
+externe, SBOM, build reproductible *(phase 7)*.
 
 **Le contenu, l'ordre, les dépendances et l'état des phases font autorité dans
 [`ROADMAP.md`](ROADMAP.md).** Ce document-ci ne les redéfinit pas : il énonce les
@@ -181,6 +181,8 @@ un suivi explicite.
 | L24 | **`cargo deny` ne couvre pas les données tierces embarquées** — il vérifie les licences des *crates*, pas des fichiers livrés. Les listes de mots (CC-BY 3.0) et la future liste des suffixes publics (MPL-2.0) échappent donc à la vérification automatique | une licence de donnée embarquée pourrait changer à l'insu du projet | contrôlée **manuellement** par `ATTRIBUTION.md`, avec empreinte épinglée et test d'intégrité. **MPL-2.0 n'est pas dans la liste blanche de `deny.toml`** : elle n'y entrera pas, un fichier de données n'étant pas une dépendance de crate. Précisé en §6.3 |
 | L25 | **La liste des suffixes publics vieillit**, et rien ne le corrige automatiquement (aucun réseau, par conception) | un suffixe récent peut ne pas être reconnu : le regroupement eTLD+1 est alors **incertain** et doit être présenté comme tel | ré-embarquement délibéré, commit revu, âge de la liste **affiché** par le centre de sécurité. Stratégie en `ROADMAP.md` §5.4 |
 | L26 | **Un fichier-clé est un fichier : il se copie.** Ce n'est donc pas un facteur de possession inviolable, contrairement à un jeton matériel qui ne peut pas être dupliqué | une copie du fichier clé ouvre le coffre depuis n'importe quelle machine, et rien ne permet de le détecter | dit à l'utilisateur à chaque installation, et repris dans `ROADMAP.md` §4 : le support doit être **physiquement distinct** du coffre et des sauvegardes, et présent seulement pendant l'ouverture. Un vrai facteur matériel (FIDO2 `hmac-secret`) est **repoussé et dit comme tel** — il exigerait `hidapi`/`libusb`, donc du C, et sortirait de la politique de dépendances (ADR-032) |
+| L30 | **Une sauvegarde n'est pas atomique.** Le couple (coffre, blobs) est fait de deux chemins indépendants, écrits en place — pas de temporaire + renommage | une interruption brutale peut laisser une destination **partielle**, qui **occupe le chemin** : une nouvelle tentative échoue, et le reliquat doit être supprimé explicitement | dit explicitement dans `docs/BACKUP.md` §2. Ce qui est **garanti** est la **détection** : une copie partielle **échoue** à `backup verify`. C'est ce qui distingue une sauvegarde d'un fichier quelconque |
+| L31 | **Le verrou de sauvegarde ne protège pas d'un accès hors de Passlock.** Un tiers peut lire le coffre pendant la copie | lecture concurrente par un processus non-Passlock | le conteneur reste chiffré ; le verrou protège la **cohérence de l'ensemble**, pas la confidentialité. Un lecteur Passlock n'est d'ailleurs **pas** bloqué, et c'est voulu |
 | L28 | **L'intégrité d'une pièce jointe est portée par son propre AEAD, et non par l'AAD du conteneur.** Un blob vit hors du fichier de coffre, donc hors de la portée de son tag | un blob supprimé par un tiers ne casse **aucun** tag : l'absence n'est constatée que par `attach verify`, qui la signale comme une incohérence | dit explicitement dans `docs/ATTACHMENT_FORMAT.md` §5.1. Une absence est une **erreur d'intégrité**, jamais un déchet : elle n'est pas candidate au ramasse-miettes. Un blob corrompu ou absent reste **référencé**, donc préservé |
 | L29 | **Une sauvegarde du seul fichier de coffre ne préserve pas les pièces jointes.** Les blobs vivent hors du conteneur | restaurer un coffre sans son répertoire `.attachments/` donne un coffre dont les pièces jointes sont **absentes** — incohérence détectée, jamais silencieuse | dit à chaque `attach add`. Le chantier « sauvegardes » (étape 3) doit inclure le répertoire des blobs ; la vérification de restauration doit rejouer le contrôle des blobs |
 | L27 | **La durabilité de l'entrée de répertoire n'est pas revendiquée sous Windows.** `make_durable` y retourne `FileOnly` : le contenu est synchronisé, pas le nom | après une coupure d'alimentation, une pièce jointe peut manquer alors que le coffre la référence — une **promesse non tenue** | le niveau est **rendu** par la primitive (`Durability`, `#[must_use]`) et **rapporté à l'ouverture** du coffre, jamais tu. L'absence est détectée par `attach verify` (étape 2). Reprise en phase 7 avec un exécuteur Windows réel |
@@ -366,6 +368,22 @@ surfaces nouvelles sont **bornées et énumérées**, comme aux phases précéde
 | **Durabilité dépendante de la plateforme** | la garantie n'est pas la même partout | `Durability` est **rendue** par la primitive, `#[must_use]`, et **rapportée à l'ouverture** du coffre. Une capacité absente n'est pas une erreur, et elle n'est pas tue. **Unix : mesuré. Windows : déclaré par `platform_durability`, NON VÉRIFIÉ** (L27) |
 | **Deux options globales d'ouverture** (`--recovery-key-stdin`, `--key-file`) | propagées à toutes les commandes | `open_store` est le **seul** point qui choisit le chemin d'ouverture : aucun chemin n'échappe aux diagnostics. **Aucun secret en argument de commande** |
 | **Clé de récupération affichée sur stdout** | un secret quitte le processus par un canal redirigeable | assumé et dit : c'est le seul moyen de la remettre à l'utilisateur. Affichée **une seule fois**, jamais journalisée, jamais recopiée sur la sortie d'erreur |
+
+### 4.10 Ce que la phase 4, étape 3, a ajouté comme surface
+
+Des sauvegardes — c'est-à-dire **une copie de l'ensemble** {coffre, blobs}, et un **second
+exemplaire** des mêmes secrets.
+
+| Surface | Nature | Traitement |
+|---|---|---|
+| **Couple (coffre, blobs)** | deux chemins indépendants, copiés séparément | **aucune atomicité revendiquée** (L30). Le **verrou exclusif** gèle l'ensemble pendant la copie, sans quoi une pièce jointe ajoutée entre les deux lectures produirait une sauvegarde incohérente |
+| **Destination partielle** | une copie interrompue occupe le chemin | **échoue** à `backup verify` ; elle n'est **jamais** écrasée par une tentative suivante, et son nettoyage est **explicite** |
+| **Effet persistant du test** | `backup verify` ouvre un fichier fourni par l'utilisateur | lecture seule **imposée dans le code testé**, pas par prudence d'appelant : aucun verrou créé, aucune permission réparée, aucune sentinelle écrite |
+| **Échec contrôlé de `create`** | une copie ratée doit disparaître | le nettoyage s'appuie sur les créations **effectivement réussies**, jamais sur l'intention : un répertoire ou un fichier **d'autrui** n'est jamais retiré |
+| **Copie de secrets** | la sauvegarde contient les mêmes données chiffrées | les blobs sont chiffrés sous `K_blob_aead`, le conteneur sous la DEK. Une sauvegarde n'est lisible qu'avec les **mêmes identifiants** : elle ne les restaure pas |
+| **Second exemplaire** | une sauvegarde antérieure **survit** à un changement de mot de passe, à une révocation de slot et à une suppression d'entrée | les slots révoqués sont supprimés du **coffre**, pas des sauvegardes déjà écrites. C'est une propriété de toute sauvegarde, et elle est **dite** plutôt que découverte |
+| **Ancienneté** | une sauvegarde restaurée réactive la génération antérieure | **deux verdicts séparés** : l'intégrité décide du succès, l'ancienneté **informe**. Le retour en arrière se détecte par la sentinelle et se **légitime** par une restauration |
+| **Durabilité** | un support qui ne persiste pas l'entrée de répertoire ne rend pas la sauvegarde impossible | `make_durable` rend `FileOnly` sur Windows : la sauvegarde est produite et **avertie**, jamais bloquée. Le niveau annoncé est le **plus faible** des deux |
 
 ### 4.9 Ce que la phase 4, étape 2, a ajouté comme surface
 
@@ -624,6 +642,7 @@ principal** que chaque phase introduit, et où il est traité.
 | 2 | historique conservant des secrets que l'utilisateur croit supprimés ; injection de requête *(écartée en abandonnant SQLite)* | §4.5, L22 |
 | 3 | faiblesse du générateur ; **revendication d'entropie trop généreuse** ; injection de séquences d'échappement par un libellé TOTP ; **le TOTP rangé dans le même coffre n'apporte aucune protection contre la compromission de ce coffre** ; horloge fausse indétectable | §4.6, §4.7, L16–L21, L23 |
 | 4 | **export en clair — fuite massive et délibérée** ; parseurs d'import à fuzzzer ; **presse-papiers comme canal public** ; ramasse-miettes de pièces jointes supprimant des fichiers | L22, T32, `docs/TOTP.md` §8 |
+| 4 *(étape 3, livrée)* | **une sauvegarde antérieure survit à une révocation de slot** et à une suppression d'entrée ; **une destination partielle occupe le chemin** (L30) ; **le test de restauration ne doit rien écrire** ; un nettoyage qui se tromperait de cible détruirait des données **d'autrui** | §4.10, L30, L31, `docs/BACKUP.md`, `docs/AUDIT_PHASE4_3_SAUVEGARDES.md` |
 | 4 *(étape 2, livrée)* | **une sauvegarde du seul fichier de coffre perd les pièces jointes** (L29) ; **l'AEAD ne détecte pas une troncature propre** — c'est la métadonnée qui le fait (L28) ; un **ramasse-miettes** qui se tromperait de catégorie détruirait des données | §4.9, L28, L29, `docs/ATTACHMENT_FORMAT.md`, `docs/AUDIT_PHASE4_2_PIECES_JOINTES.md` |
 | 4 *(étape 1, livrée)* | **un slot supplémentaire est un chemin d'entrée de plus** — récupérabilité et résistance au vol varient en sens inverse ; **le fichier-clé n'est pas un facteur matériel** (L26) ; **la durabilité réduite sous Windows** peut laisser une promesse non tenue après coupure (L27) ; un secret affiché sur stdout est redirigeable | §4.8, §8, L26, L27, `docs/AUDIT_PHASE4_1_RECUPERATION.md` |
 | 5 | **faux sentiment de protection** — un centre de sécurité qui rassure sans rien garantir ; regroupement de domaines par eTLD+1 erroné dans certains cas, notamment sur un suffixe absent d'une liste vieillissante (L25) ; `expires_at` est le **seul** élément de la phase qui écrit dans les entrées, et il écrit une donnée fournie par l'utilisateur | à traiter **en phase 5** ; décisions déjà tranchées en `ROADMAP.md` §5.3 et §5.4 |

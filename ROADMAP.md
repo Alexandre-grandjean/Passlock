@@ -34,7 +34,7 @@ Un seul document définit le contenu d'une phase : celui-ci. Les autres s'y réf
 | **1** | Moteur cryptographique et conteneur | **Terminée et gelée** |
 | **2** | Modèle de données et cœur de stockage | **Terminée et gelée** |
 | **3** | Générateur de secrets et TOTP | **Terminée et approuvée** |
-| **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **En cours** — étapes 1 à 4 sur 5 closes |
+| **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **Terminée** — 4 étapes livrées ; étape 5 (presse-papiers) **abandonnée** par le gate E.0 |
 | **5** | Centre de sécurité et analyse d'URL | **Non commencée** |
 | **6** | Interface graphique | **Non commencée** |
 | **7** | Durcissement, audit et livrables de release | **Non commencée** |
@@ -255,8 +255,12 @@ le presse-papiers, ou vers un blob séparé.
 
 **État**
 
-- **En cours.** Le périmètre est exécuté en cinq étapes, chacune close par un audit
-  adversarial séparé.
+- **Terminée.** Quatre étapes livrées, chacune close par un audit adversarial séparé.
+  La **cinquième — presse-papiers — est abandonnée** par le gate E.0
+  (`docs/AUDIT_PHASE4_5_CLIPBOARD.md`) : la bibliothèque retenue (`arboard 3.6.1`)
+  aurait exigé d'**élargir** la liste de licences de `deny.toml` et d'**affaiblir**
+  `multiple-versions`, c'est-à-dire un renforcement de la chaîne d'approvisionnement
+  refusé. Le presse-papiers **n'est pas** une fonctionnalité de Passlock.
 - **Étape 1 — récupération : close et auditée**
   (`docs/AUDIT_PHASE4_1_RECUPERATION.md`). Livrés : clé de récupération de 256 bits en
   Crockford Base32 avec total de contrôle, **fichier-clé** sur support amovible par le
@@ -289,8 +293,18 @@ le presse-papiers, ou vers un blob séparé.
   l'ordre d'origine. L'**import** valide **tout** avant d'écrire, puis n'enregistre
   qu'une fois — un CSV refusé ne laisse **aucune** modification. Commandes `export`
   (`--output`/`--stdout`, jamais par défaut) et `import` (`--input`).
-- **Restent : étape 5** — presse-papiers.
-- C'est la **plus large** des phases restantes : cinq chantiers indépendants.
+- **Étape 5 — presse-papiers : abandonnée par le gate E.0**
+  (`docs/AUDIT_PHASE4_5_CLIPBOARD.md`). Le gate de chaîne d'approvisionnement a conclu
+  **P3** : `arboard 3.6.1` (avec `default-features = false` et
+  `wayland-data-control`) ferait échouer `cargo deny check` — **licences** hors de la
+  liste blanche (`Zlib` et `Unicode-3.0` sous Unix, `BSL-1.0` sous Windows) et
+  **versions multiples** (`hashbrown` sous Unix, `windows-sys` sous Windows). Le faire
+  passer aurait exigé d'**élargir** la liste de licences et d'ajouter des contournements
+  de versions — un affaiblissement du contrôle **refusé**. **Aucune dépendance clipboard
+  n'a été ajoutée**, aucun contrôle `cargo-deny` n'a été désactivé, et **aucun code de
+  presse-papiers n'existe** dans le projet. Les prérequis réels n'ont pas pu être
+  satisfaits proprement ; le mécanisme est donc écarté, et non reporté.
+- **Phase 4 close et gelée.**
 
 ---
 

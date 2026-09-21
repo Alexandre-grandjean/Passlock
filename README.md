@@ -7,18 +7,24 @@ mécanisme de récupération à distance, aucune télémétrie, aucune synchroni
 propriétaire — et ces absences sont des choix de conception, pas des
 fonctionnalités manquantes.
 
-> **Statut : phases 0 à 3 terminées et approuvées. Phase 4 en cours — étapes 1 à 4 sur 5 closes.**
+> **Statut : phases 0 à 3 terminées et approuvées. Phase 4 terminée** — quatre étapes
+> livrées, la cinquième (presse-papiers) **abandonnée par le gate E.0**.
 >
 > Existent et sont testés : le moteur cryptographique et le format de coffre
 > (phase 1), le cœur de stockage — modèle de données, archive, migration, recherche,
 > historique, corbeille (phase 2), le générateur de secrets avec le TOTP (phase 3),
 > la **récupération** — clé de récupération et fichier-clé —, les **pièces jointes**
 > chiffrées, les **sauvegardes** avec test de restauration, et l'**import/export CSV**
-> canonique (phase 4, étapes 1 à 4 sur 5).
+> canonique (phase 4, étapes 1 à 4).
 >
-> N'existent **pas encore** : presse-papiers *(phase 4, étape 5)* ; centre de sécurité
-> et analyse d'URL *(phase 5)* ; interface graphique *(phase 6)* ; audit externe, SBOM
-> et build reproductible *(phase 7)*.
+> Le **presse-papiers** n'est **pas** une fonctionnalité de Passlock : le gate E.0
+> (chaîne d'approvisionnement) a conclu à l'**abandon** — `arboard` aurait exigé
+> d'élargir la liste de licences et d'affaiblir `multiple-versions`, ce qui a été
+> **refusé**. Voir [`docs/AUDIT_PHASE4_5_CLIPBOARD.md`](docs/AUDIT_PHASE4_5_CLIPBOARD.md).
+>
+> N'existent **pas encore** : centre de sécurité et analyse d'URL *(phase 5)* ;
+> interface graphique *(phase 6)* ; audit externe, SBOM et build reproductible
+> *(phase 7)*.
 >
 > Le contenu des phases fait autorité dans **[`ROADMAP.md`](ROADMAP.md)**.
 
@@ -260,6 +266,7 @@ techniquement ni juridiquement.
 | [`docs/AUDIT_PHASE4_3_SAUVEGARDES.md`](docs/AUDIT_PHASE4_3_SAUVEGARDES.md) | **Audit de la phase 4, étape 3** : verrou de l'ensemble, nettoyage des créations, et une cible de fuzzing morte depuis la phase 2 |
 | [`docs/IMPORT_EXPORT.md`](docs/IMPORT_EXPORT.md) | **Format d'import/export CSV** reproductible : 12 colonnes, échappement contextuel, structure canonique de `fields`, bornes, déterminisme |
 | [`docs/AUDIT_PHASE4_4_IMPORT_EXPORT.md`](docs/AUDIT_PHASE4_4_IMPORT_EXPORT.md) | **Audit de la phase 4, étape 4** : déterminisme de l'export, échappement strict, import transactionnel, bornes avant allocation |
+| [`docs/AUDIT_PHASE4_5_CLIPBOARD.md`](docs/AUDIT_PHASE4_5_CLIPBOARD.md) | **Gate E.0 — presse-papiers** : abandon (P3). Ce que `cargo deny` a mesuré, pourquoi P1 et P2 sont écartés, et pourquoi **aucune dépendance clipboard n'a été ajoutée** |
 | [`docs/AUDIT_PHASE3.md`](docs/AUDIT_PHASE3.md) | Audit adversarial du générateur et du TOTP : 35 vecteurs RFC, fuzzing, secret en mémoire, défauts trouvés |
 | [`docs/AUDIT_PHASE2_SEMANTIQUE.md`](docs/AUDIT_PHASE2_SEMANTIQUE.md) | **Audit sémantique** du magasin par modèle de référence : 9 500 opérations comparées, 18 invariants |
 | [`docs/AUDIT_PHASE2.md`](docs/AUDIT_PHASE2.md) | Audit adversarial du cœur de stockage |

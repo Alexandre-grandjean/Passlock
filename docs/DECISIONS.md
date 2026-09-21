@@ -1235,3 +1235,57 @@ le coffre en **lecture seule imposée** : aucun verrou, aucune sentinelle, aucun
 dépendances du cœur interdit toute bibliothèque de (dé)sérialisation ou tout parseur
 générique. Un parseur borné et strict, fuzzé (`csv_import`), vaut mieux qu'une brique de
 plus à auditer.
+
+---
+
+## ADR-037 — Presse-papiers : abandonné par le gate E.0
+
+**Statut :** accepté — **la fonctionnalité n'existe pas**, et n'existera pas
+
+**Problème.** L'étape 5 de la phase 4 prévoyait la copie d'un secret vers le
+presse-papiers. Deux questions se posaient avant d'écrire du code : *où* placer la
+dépendance, et *si* elle était acceptable sous la politique de chaîne d'approvisionnement.
+
+**Contraintes posées avant le gate.** `arboard 3.6.1`, `default-features = false`,
+fonctionnalité `wayland-data-control` ; la dépendance reste dans **`passlock-cli`**, et le
+cœur n'en dépend **jamais**.
+
+**Décision.** La fonctionnalité est **abandonnée**. Aucune dépendance clipboard n'a été
+ajoutée, aucun code de presse-papiers n'existe, et **aucun contrôle `cargo-deny` n'a été
+affaibli**.
+
+**Ce que le gate a mesuré.** Avec un crate sonde **hors du dépôt**, puis `cargo deny check`
+muni du `deny.toml` du projet (`advisories ok, bans FAILED, licenses FAILED, sources ok`) :
+
+* **`licenses` échoue** : `Zlib` (`foldhash`) et `Unicode-3.0` (`unicode-ident`) sous Unix,
+  `BSL-1.0` (`clipboard-win`, `error-code`) sous Windows — hors de la liste blanche
+  {`MIT`, `Apache-2.0`, `BSD-3-Clause`}, protégée par `unused-allowed-license = "deny"`.
+* **`bans` échoue** (`multiple-versions = "deny"`) : `hashbrown` 0.15/0.17 sous Unix (par
+  `petgraph → hashbrown` et `petgraph → indexmap → hashbrown`), `windows-sys` 0.60/0.61
+  sous Windows (le projet déclare `0.61` dans `passlock-platform`).
+* **Unix non pur Rust** : `wayland-sys` lie la **libwayland C** (build-dependency
+  `pkg-config`) et `wayland-backend` une build-dependency `cc`.
+* **Macros procédurales dans l'arbre du CLI** : `syn`, `proc-macro2`, `quote`,
+  `unicode-ident`, `thiserror-impl`, `wayland-scanner` — alors que `passlock-cli` évite
+  délibérément `clap` `derive` précisément pour les garder dehors.
+
+**Pourquoi P1 et P2 sont écartés.** **P1** (Unix seul propre) échoue déjà sur `licenses`
+**et** `bans`, et tire une bibliothèque C. **P2** (exception `windows-sys` étroite) ne
+couvre ni le doublon `hashbrown` sous Unix, ni les licences des deux plateformes, ni la
+libwayland : faire passer la vérification aurait exigé d'**élargir la liste de licences de
+trois entrées** et d'**ajouter des contournements de versions** — exactement le « large
+deny skip » exclu.
+
+**P3 retenu.** Les prérequis ne peuvent pas être satisfaits **proprement**, sans
+affaiblir le contrôle de chaîne d'approvisionnement. Le mécanisme est donc **écarté, et
+non reporté**.
+
+**Pourquoi c'est cohérent, et non une facilité.** Le presse-papiers est un **canal public
+par conception** (`docs/TOTP.md` §8) : sous X11, toute application lit la sélection sans
+permission ni journal ; elle survit au processus, peut être historisée et synchronisée
+entre machines. Le mécanisme n'aurait apporté **aucune garantie de sécurité**. L'abandon
+**ferme** un risque majeur (T32 / L22) au lieu de l'introduire.
+
+**Ce qui n'est PAS revendiqué comme vérifié.** L'exécution **Windows n'a pas été
+réalisée** ; le doublon `windows-sys` est constaté par **résolution** (`cargo tree`,
+`cargo deny`), pas par exécution. La CI n'a pas été lancée sur ce dépôt.

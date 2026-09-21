@@ -252,7 +252,7 @@ exactement le code.
 `--json` produit une sortie exploitable par un script. **Le JSON ne contient jamais
 de secret à longue durée de vie** : ni le secret partagé, ni l'URI.
 
-### Copie : reportée en phase 4, conçue dès maintenant
+### Copie : abandonnée par le gate E.0
 
 Le presse-papiers est le canal le plus dangereux du produit, parce qu'il est
 **public par conception**.
@@ -264,10 +264,17 @@ Le presse-papiers est le canal le plus dangereux du produit, parce qu'il est
 | Synchronisation entre machines | Transforme un secret local en secret réseau |
 | Capture d'écran | Hors de portée du logiciel |
 
-La conception retenue pour la phase 4 : durée de vie **jamais supérieure au temps
-restant du code**, vérification avant écrasement, effacement à la sortie y compris sur
-erreur, et avertissement **à la première utilisation par session** — un avertissement
-qu'on ne lit plus ne protège personne.
+La conception qui avait été retenue — durée de vie **jamais supérieure au temps restant
+du code**, vérification avant écrasement, effacement à la sortie y compris sur erreur,
+avertissement **à la première utilisation par session** — **n'a pas été implémentée**.
+
+**La copie vers le presse-papiers est abandonnée** par le gate E.0
+(`docs/AUDIT_PHASE4_5_CLIPBOARD.md`, ADR-037) : `arboard 3.6.1` aurait exigé d'élargir la
+liste de licences et d'affaiblir `multiple-versions` de `deny.toml`. Aucune dépendance
+clipboard n'a été ajoutée, aucun contrôle de chaîne d'approvisionnement n'a été assoupli.
+Le raisonnement de ce paragraphe reste : le presse-papiers est un canal public par
+conception, et aucune garantie de sécurité n'aurait été possible. **Le code TOTP n'est donc
+jamais copié automatiquement** ; l'utilisateur reste seul responsable de ce qu'il en fait.
 
 ### Ce qui n'est jamais fait
 

@@ -50,7 +50,7 @@ plutôt que de faire disparaître des données.
 | `trashed_at` | `Option<u64>` | — | mise à la corbeille ; `0` encodé signifie « aucune » |
 | `archived` | booléen | — | archivée |
 | `favorite` | booléen | — | favorite |
-| `sensitive` | booléen | — | exige une réauthentification avant révélation *(appliqué en phase 6)* |
+| `sensitive` | booléen | — | marque une entrée sensible. La **réauthentification avant révélation** qui devait l'exploiter appartenait à l'interface graphique, **abandonnée** (gates E.1/E.2, ADR-042) : le marqueur est **stocké, exporté et affiché**, mais **aucune couche n'impose la réauthentification** |
 | `folder` | `Option<FolderId>` | — | dossier de rattachement |
 | `tags` | `Vec<TagId>` | 64 | tags |
 | `fields` | `Vec<Field>` | 256 | contenu |

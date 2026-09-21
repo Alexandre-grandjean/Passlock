@@ -854,8 +854,9 @@ Vérifier l'heure en ligne dans un gestionnaire hors ligne est une contradiction
 
 **Ce qui n'est pas revendiqué.** **Aucune détection de dérive n'est annoncée.** Un CLI
 vit quelques millisecondes : comparer `Instant` et `SystemTime` sur cette durée ne
-détecte rien d'utile. La comparaison a du sens dans une application longue (phase 6) et
-sera conçue là.
+détecte rien d'utile. La comparaison aurait eu du sens dans une application longue —
+l'interface graphique (phase 6), **abandonnée** (ADR-042) : elle n'est donc **pas
+conçue**.
 
 **Limite écrite.** Si l'horloge système est fausse, les codes sont faux, et Passlock ne
 peut pas le détecter. C'est une conséquence du rôle de **prouveur** : la RFC 6238 §6
@@ -885,9 +886,11 @@ demandant un code toutes les 30 s, cela impose un déverrouillage toutes les 30 
 inconfortable, et correct. La lenteur d'Argon2id (256 Mio, ~0,78 s mesuré) est
 précisément ce qui protège le coffre.
 
-**Voie retenue pour le confort.** L'interface graphique (phase 6) maintiendra une
-session déverrouillée en mémoire avec verrouillage automatique — et non un affaiblissement
-du modèle.
+**Voie retenue pour le confort.** Elle reposait sur l'interface graphique (phase 6) —
+une session déverrouillée en mémoire avec verrouillage automatique. **Cette voie est sans
+objet** : la phase 6 a été **abandonnée** (ADR-042), faute de framework graphique
+compatible avec la politique de chaîne d'approvisionnement. Le confort n'est ni obtenu par
+un affaiblissement du modèle, ni obtenu du tout — et ce refus reste en vigueur.
 
 ---
 
@@ -1463,3 +1466,66 @@ fait sur une estimation indéterminée ; la ligne ne l'énonce plus qu'une fois.
 **Limite.** Un rapport **vide** ne prouve rien : les six indicateurs sont bornés
 (L34, L35) et ne couvrent ni les fuites en ligne, ni les dictionnaires (**L37**).
 Aucun score global n'existe pour donner l'illusion du contraire.
+
+---
+
+## ADR-042 — Interface graphique : abandonnée après les gates E.1 et E.2
+
+**Statut :** accepté — **la fonctionnalité n'existe pas**, et elle n'est **pas reportée**
+
+**Problème.** La phase 6 prévoyait un crate `passlock-gui` consommant `passlock-core`,
+destiné au confort d'usage — session déverrouillée en mémoire, verrouillage automatique,
+réauthentification des entrées `sensitive`, création de coffre, QR d'enrôlement TOTP, et
+administration des pièces jointes et de l'import/export. La question posée **avant
+d'écrire une ligne de code** était : *un framework graphique est-il compatible avec la
+politique de chaîne d'approvisionnement de `deny.toml` ?*
+
+**Décision.** La phase 6 est **abandonnée**. Aucun crate `passlock-gui` n'est créé,
+**aucune dépendance graphique n'est ajoutée**, `deny.toml` est **inchangé** — aucune
+licence autorisée en plus, aucun advisory ignoré, aucun assouplissement de
+`multiple-versions` — et **aucun frontend n'existe**. La décision est **structurellement
+la même** que celle du presse-papiers (ADR-037) : un mécanisme dont les prérequis ne
+peuvent pas être satisfaits **proprement** est **écarté, et non reporté**.
+
+**Ce que les gates ont mesuré.** Trois campagnes conduites dans des **sondes isolées,
+hors du dépôt Passlock** — ces sondes **n'entrent pas** dans le dépôt :
+
+* **E.1 — Tauri 2.11.6 : P3.** Six advisories ; 38 familles de versions multiples ;
+  quatre familles de licences hors de la liste blanche ; une pile GTK/WebKit2 native ;
+  environ **+363 crates**. Faire passer Tauri aurait exigé un affaiblissement important de
+  la politique `cargo-deny`.
+* **E.2 — GUI natives : P3.** `eframe`/`egui` 0.36.2, `iced` 0.14.0, Slint 1.18.1 et
+  FLTK 1.5.23. FLTK, d'abord classé P2, a été corrigé en **P3** : son advisory
+  RUSTSEC-2026-0192 porte sur `ttf-parser`, une dépendance **directe et
+  inconditionnelle**, et la règle du projet est qu'un advisory à ignorer entraîne P3.
+* **E.2 bis — `egui` minimal sans `eframe` : P3.** Pile `egui` 0.36.2, `egui-winit`
+  0.36.2 (`default-features = false`), `egui_glow` 0.36.2, `winit` 0.30.13, `glutin`
+  0.32.3, `glutin-winit` 0.5.0. Le graphe ne contient **ni presse-papiers OS, ni webview,
+  ni client HTTP, ni accès filesystem générique, ni `wgpu`** — mais il active environ
+  **192 nœuds**, **sept familles de versions multiples**, **cinq licences rejetées** dans
+  la variante utilisable et **un advisory** (`ttf-parser`). La variante **sans polices**
+  supprime l'advisory, mais conserve les sept familles de versions multiples et les
+  licences restantes.
+
+**Aucune solution évaluée, dans le cadre et les politiques actuels, n'est acceptable pour
+cette version.** Ce n'est **pas** une impossibilité absolue de construire une interface
+graphique un jour : c'est le constat, mesuré, qu'aucune des solutions évaluées ne respecte
+la politique actuelle sans l'affaiblir de manière significative.
+
+**Pourquoi c'est cohérent, et non une facilité.** L'objectif de la phase 6 était
+explicite : « une interface qui obligerait à relâcher une propriété de sécurité ne serait
+pas une avancée » (`ROADMAP.md`). Élargir la liste de licences, ignorer un advisory et
+affaiblir `multiple-versions` auraient été exactement cela. L'abandon **préserve** la
+politique de chaîne d'approvisionnement au lieu de la dégrader, comme l'a fait l'abandon
+du presse-papiers.
+
+**Conséquence sur le risque de session en mémoire.** Le risque consigné dans
+`SECURITY.md` §11 — « extension de la durée de vie de la clé en mémoire par la session
+déverrouillée » — **disparaît avec la fonctionnalité** : aucune session graphique
+n'existe, donc **aucun mécanisme de session n'est implémenté**, et **ADR-030 reste
+intégralement en vigueur**.
+
+**Ce qui n'est PAS revendiqué comme vérifié.** Les gates E.1/E.2/E.2 bis sont des mesures
+de **résolution de dépendances** et de **`cargo deny`**, conduites **hors du dépôt** :
+**aucune interface graphique n'a été compilée ni exécutée**. La CI de Passlock n'a ni été
+modifiée ni relancée sur ces sondes.

@@ -6,9 +6,11 @@
 
 ## Statut du projet
 
-**Phases 0 à 3 terminées et approuvées. Phase 4 terminée** — quatre étapes livrées, la
-cinquième (presse-papiers) **abandonnée par le gate E.0** : elle n'est pas une
-fonctionnalité de Passlock.
+**Phases 0 à 3 terminées et approuvées. Phases 4 et 5 terminées.** La phase 4 compte
+quatre étapes livrées, la cinquième (presse-papiers) **abandonnée par le gate E.0** : elle
+n'est pas une fonctionnalité de Passlock. La phase 5 (centre de sécurité et analyse d'URL)
+est livrée et gelée. La **phase 6 (interface graphique)** est **abandonnée par les gates
+E.1/E.2** : elle n'est pas une fonctionnalité de cette version.
 
 Ce qui existe et est testé : dérivation de clés, chiffrement authentifié, hiérarchie
 de clés, conteneur et son format, écriture atomique, verrouillage, sentinelle
@@ -17,14 +19,22 @@ historique, corbeille, recherche, migration ; générateur de mots de passe, de 
 de passe et de secrets arbitraires ; HOTP et TOTP avec analyse des URI
 `otpauth://` ; interface en ligne de commande headless.
 
-Ce qui n'existe **pas encore** : centre de sécurité et analyse d'URL *(phase 5)* ;
-interface graphique *(phase 6)* ; audit externe, SBOM, build reproductible *(phase 7)*.
+Ce qui n'existe **pas encore** : l'interface graphique *(phase 6, **abandonnée**)* ; audit
+externe, SBOM, build reproductible *(phase 7)*.
 
 **Le presse-papiers n'existe pas et ne fera pas partie du produit.** Le gate E.0 a
 conclu à l'abandon (P3) : la bibliothèque `arboard` aurait obligé à élargir la liste de
 licences et à affaiblir `multiple-versions` de `deny.toml` — un affaiblissement de la
 chaîne d'approvisionnement refusé. Aucune dépendance clipboard n'a été ajoutée. Le détail
 est dans `docs/AUDIT_PHASE4_5_CLIPBOARD.md`.
+
+**L'interface graphique n'existe pas et ne fait pas partie de cette version.** Les gates
+E.1/E.2 ont conclu qu'aucun des frameworks évalués — Tauri 2.11.6, `eframe`/`egui`, `iced`,
+Slint, FLTK, puis `egui` minimal sans `eframe` — n'est compatible avec la politique de
+chaîne d'approvisionnement sans l'affaiblir de manière significative. Aucune dépendance
+graphique n'a été ajoutée, `deny.toml` est **inchangé**, et **aucune surface
+webview/IPC/CSP** n'est introduite. Les sondes E.1/E.2/E.2 bis sont des travaux **hors du
+dépôt** et n'y entrent pas. Détail et motifs dans `docs/DECISIONS.md` ADR-042.
 
 **Le contenu, l'ordre, les dépendances et l'état des phases font autorité dans
 [`ROADMAP.md`](ROADMAP.md).** Ce document-ci ne les redéfinit pas : il énonce les
@@ -725,7 +735,7 @@ principal** que chaque phase introduit, et où il est traité.
 | 5 *(étape 4, livrée)* | **un rapport vide rassure à tort** (L37) ; **un secret ou une empreinte pourrait fuiter par l'affichage** | §4.15, L37 ; aucun score, aucune valeur, aucune empreinte, et l'incertitude est affichée comme telle |
 | 5 *(étape 3, livrée)* | `expires_at` est le **seul** élément de la phase qui écrit dans les entrées, et il écrit une donnée **fournie par l'utilisateur** ; plusieurs champs pourraient coexister | §4.14, L36 ; l'ambiguïté est **refusée** sans suppression, l'écriture passe par `update_entry`, et la date n'est **jamais** appliquée par le coffre |
 | 5 *(étape 1, livrée)* | **un centre de sécurité qui rassure sans rien garantir** — l'estimation de robustesse est aveugle aux dictionnaires (L34) ; l'absence de TOTP peut sur-signaler ; l'empreinte de réutilisation est une fonction de la valeur (jamais persistée ni affichée) | §4.12, L34, `docs/AUDIT_PHASE5_1_CENTRE_SECURITE.md` |
-| 6 | webview ; IPC ; CSP ; **extension de la durée de vie de la clé en mémoire** par la session déverrouillée | à traiter **en phase 6**, et à documenter ici |
+| 6 | **abandonnée** — aucun `passlock-gui`, aucun webview, aucun IPC, aucune CSP, aucune session graphique. Les risques webview/IPC/CSP et d'**extension de la durée de vie de la clé en mémoire** **ne sont pas introduits**, faute de fonctionnalité | **sans objet** ; ADR-030 reste en vigueur ; `deny.toml` inchangé (gates E.1/E.2, `docs/DECISIONS.md` ADR-042) |
 | 7 | **un audit externe non réalisé alors que le produit se présente comme vérifié** | §Statut, L10 |
 
 **Les deux risques les plus élevés de cette table ne sont pas techniques.** Le

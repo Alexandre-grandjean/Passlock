@@ -75,8 +75,9 @@ précision.
 
 État : **F1**/**F2**/**F3** = traité respectivement en phase 1, 2 ou 3 (implémenté et
 testé) · **F4.1** = livré à l'étape 1 de la phase 4 (récupération) · **F4**–**F7** =
-prévu à la phase indiquée · **—** = hors périmètre ou non implémenté. Le contenu des
-phases fait autorité dans [`ROADMAP.md`](ROADMAP.md).
+prévu à la phase indiquée · **—** = hors périmètre ou non implémenté. La **phase 6
+(interface graphique)** est **abandonnée** (gates E.1/E.2), donc **F6** n'est pas livré.
+Le contenu des phases fait autorité dans [`ROADMAP.md`](ROADMAP.md).
 
 | # | Menace | Impact | Prob. | Mesure défensive | Limite de la défense | État |
 |---|---|---|---|---|---|---|
@@ -94,7 +95,7 @@ phases fait autorité dans [`ROADMAP.md`](ROADMAP.md).
 | T12 | Malware local non privilégié | Critique | **Élevée** | réduction de surface : aucun réseau, aucune extension navigateur, permissions 0600, verrou de fichier | accès complet au coffre **pendant** qu'il est déverrouillé | **F1** (partiel) |
 | T13 | Keylogger | Critique | Élevée | saisie sans écho ; rien d'autre n'est fiable | **aucune défense réelle** contre un hook clavier | — |
 | T14 | Détournement du presse-papiers | Élevé | Moyenne | **aucune : Passlock ne copie rien dans le presse-papiers** | le presse-papiers reste un canal public, mais **aucun secret n'y est jamais placé** | **abandonné** — gate E.0 (`docs/AUDIT_PHASE4_5_CLIPBOARD.md`) |
-| T15 | Capture d'écran | Élevé | Moyenne | `WDA_EXCLUDEFROMCAPTURE` sur **Windows uniquement** ; délai avant révélation | **aucun équivalent Linux** ; un appareil photo contourne tout | **F6** |
+| T15 | Capture d'écran | Élevé | Moyenne | **aucune mesure livrée** : la contre-mesure prévue (`WDA_EXCLUDEFROMCAPTURE` sous Windows, délai avant révélation) appartenait à l'interface graphique | **aucun équivalent Linux** ; un appareil photo contourne tout | **—** *(interface graphique **abandonnée** — gates E.1/E.2, ADR-042)* |
 | T16 | Lecture de mémoire par un processus privilégié | Critique | Faible | `zeroize`, `mlock`, `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`, `MADV_DONTDUMP` | `ptrace` en `root` lit tout. Défense **impossible** contre Ad4 | F1 (partiel) |
 | T17 | Navigateur compromis | Critique | Moyenne | **aucune intégration navigateur** ; le coffre n'écoute sur aucun socket | hors périmètre par choix, pas par oubli | — |
 | T18 | Extension malveillante | Critique | Élevée | aucune surface exposée au navigateur | contournée par T12 si l'extension peut lire les fichiers | — |

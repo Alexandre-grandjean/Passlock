@@ -7,8 +7,9 @@ mécanisme de récupération à distance, aucune télémétrie, aucune synchroni
 propriétaire — et ces absences sont des choix de conception, pas des
 fonctionnalités manquantes.
 
-> **Statut : phases 0 à 3 terminées et approuvées. Phase 4 terminée** — quatre étapes
-> livrées, la cinquième (presse-papiers) **abandonnée par le gate E.0**.
+> **Statut : phases 0 à 5 terminées.** La phase 4 compte quatre étapes livrées, la
+> cinquième (presse-papiers) **abandonnée par le gate E.0** ; la phase 5 est livrée et
+> gelée. La **phase 6 (interface graphique)** est **abandonnée par les gates E.1/E.2**.
 >
 > Existent et sont testés : le moteur cryptographique et le format de coffre
 > (phase 1), le cœur de stockage — modèle de données, archive, migration, recherche,
@@ -26,8 +27,11 @@ fonctionnalités manquantes.
 > d'élargir la liste de licences et d'affaiblir `multiple-versions`, ce qui a été
 > **refusé**. Voir [`docs/AUDIT_PHASE4_5_CLIPBOARD.md`](docs/AUDIT_PHASE4_5_CLIPBOARD.md).
 >
-> N'existent **pas encore** : interface graphique *(phase 6)* ; audit externe, SBOM et
-> build reproductible *(phase 7)*.
+> L'**interface graphique** n'existe **pas** et ne fait pas partie de cette version :
+> aucun framework évalué n'est compatible avec la politique de chaîne d'approvisionnement
+> sans l'affaiblir — gates E.1/E.2, [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-042.
+>
+> N'existent **pas encore** : audit externe, SBOM et build reproductible *(phase 7)*.
 >
 > Le contenu des phases fait autorité dans **[`ROADMAP.md`](ROADMAP.md)**.
 

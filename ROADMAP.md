@@ -35,8 +35,8 @@ Un seul document définit le contenu d'une phase : celui-ci. Les autres s'y réf
 | **2** | Modèle de données et cœur de stockage | **Terminée et gelée** |
 | **3** | Générateur de secrets et TOTP | **Terminée et approuvée** |
 | **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **Terminée** — 4 étapes livrées ; étape 5 (presse-papiers) **abandonnée** par le gate E.0 |
-| **5** | Centre de sécurité et analyse d'URL | **En cours** — étapes 5.1 à 5.4 livrées |
-| **6** | Interface graphique | **Non commencée** |
+| **5** | Centre de sécurité et analyse d'URL | **Terminée et gelée** — étapes 5.1 à 5.4 livrées |
+| **6** | Interface graphique | **Abandonnée** — gate E.1/E.2 |
 | **7** | Durcissement, audit et livrables de release | **Non commencée** |
 
 ---
@@ -186,7 +186,8 @@ la surface d'aléa ni la surface d'analyse au-delà de ce que les phases 1 et 2 
   « déverrouillage TOTP », coffre TOTP séparé.
 - Vérification de l'heure en ligne (NTP) — romprait l'absence de réseau, propriété de
   sécurité de la phase 1.
-- QR code d'enrôlement — appartient à la **phase 6**.
+- QR code d'enrôlement — appartenait à la **phase 6**, **abandonnée** (gate E.1/E.2) ;
+  **non livré**.
 - Estimateur de robustesse de mots de passe humains.
 - Tout secret passé en argument de commande.
 
@@ -492,8 +493,8 @@ Ces trois contraintes sont **constitutives** de la phase, pas des préférences.
   pourcentage, aucun classement ; **aucune valeur de champ** ni **aucune empreinte** de
   réutilisation n'est affichée ; `Unknown`/`Indeterminate` sont rendus **comme tels**,
   jamais comme « valide » ou « fort ».
-- **Phase 5 : les quatre étapes sont livrées.** Reste la **clôture** (commit/tag), non
-  faite à ce stade.
+- **Phase 5 close et gelée.** Les quatre étapes sont livrées, et la clôture — commit et
+  tag `phase-5-complete` — est faite.
 
 ---
 
@@ -503,7 +504,7 @@ Ces trois contraintes sont **constitutives** de la phase, pas des préférences.
 Une interface qui obligerait à relâcher une propriété de sécurité ne serait pas une
 avancée.
 
-**Fonctionnalités incluses**
+**Fonctionnalités prévues — aucune n'est livrée**
 
 - Crate `passlock-gui`, consommant `passlock-core` — **aucune logique de sécurité
   dupliquée** dans la couche graphique.
@@ -532,7 +533,31 @@ avancée.
 
 **État**
 
-- **Non commencée.**
+- **Abandonnée — gate E.1/E.2.** Aucun des frameworks graphiques évalués n'est
+  compatible avec la politique de chaîne d'approvisionnement de `deny.toml` sans
+  l'affaiblir de manière significative : **Tauri 2.11.6** (P3) ; les GUI natives
+  **`eframe`/`egui` 0.36.2, `iced` 0.14.0, Slint 1.18.1, FLTK 1.5.23** (P3) ; et
+  **`egui` minimal sans `eframe`** (P3). **Aucune solution évaluée, dans le cadre et
+  les politiques actuels, n'est acceptable pour cette version.**
+- **Rien n'a été implémenté** : aucun crate `passlock-gui`, aucun toolkit graphique,
+  aucun frontend. **Aucune dépendance graphique n'a été ajoutée**, **aucune licence
+  autorisée en plus**, **aucun advisory ignoré**, **aucun assouplissement de
+  `multiple-versions`**. `deny.toml` est **inchangé**.
+- **Aucune nouvelle surface webview/IPC/CSP** n'est introduite : aucune de ces
+  bibliothèques n'entre dans l'arbre.
+- **Fonctionnalités prévues et non livrées** : session déverrouillée en mémoire côté
+  GUI, verrouillage automatique GUI, réauthentification `sensitive` dans la GUI, création
+  de coffre via GUI, QR TOTP GUI, et interface graphique des pièces jointes, de
+  l'import/export et du centre de sécurité.
+- **Non reportée.** Comme le presse-papiers en phase 4.5, la phase 6 est **écartée, et
+  non reportée** : ses prérequis ne peuvent pas être satisfaits proprement sous la
+  politique actuelle. Voir `docs/DECISIONS.md` ADR-042 et, pour le précédent,
+  `docs/AUDIT_PHASE4_5_CLIPBOARD.md`.
+- **Ce qui reste disponible.** Les fonctionnalités **CLI/cœur** correspondantes —
+  création de coffre, import/export, pièces jointes, centre de sécurité, code TOTP —
+  **restent livrées** en ligne de commande ; c'est la **couche graphique** qui n'existe
+  pas.
+- **Phase 6 close et gelée.**
 
 ---
 

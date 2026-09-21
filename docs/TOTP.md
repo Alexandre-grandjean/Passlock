@@ -154,8 +154,9 @@ limite est antérieure à la phase 3, elle n'est pas corrigée ici, et elle est
 **Conséquence pratique : aucun code n'est produisible sans déverrouillage.** Pour un
 site demandant un code toutes les 30 s, cela impose un déverrouillage toutes les
 30 s — inconfortable, et correct : la lenteur d'Argon2id (256 Mio, ~0,78 s) est
-précisément ce qui protège le coffre. L'interface graphique (phase 6) résoudra le
-confort par une session déverrouillée, pas en affaiblissant le modèle.
+précisément ce qui protège le coffre. La session déverrouillée qui devait apporter le
+confort appartenait à l'interface graphique, **abandonnée** (gates E.1/E.2, ADR-042) : le
+confort n'est ni obtenu par un affaiblissement du modèle, ni obtenu du tout (ADR-030).
 
 ---
 
@@ -187,8 +188,9 @@ avait été écarté pour un motif voisin.
 
 **Aucune détection de saut d'horloge n'est revendiquée.** Un CLI vit quelques
 millisecondes : comparer `Instant` et `SystemTime` sur cette durée ne détecte rien
-d'utile. La comparaison a du sens dans une application longue (phase 6) et sera conçue
-là, pas prétendue ici.
+d'utile. La comparaison aurait eu du sens dans une application longue — l'interface
+graphique (phase 6), **abandonnée** (gates E.1/E.2, ADR-042) : elle n'est donc **pas
+conçue**, et le confort d'une session longue n'existe pas.
 
 **Limite principale de cette phase, structurelle et non corrigeable hors ligne :**
 

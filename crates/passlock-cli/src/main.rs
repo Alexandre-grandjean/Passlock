@@ -30,6 +30,7 @@ mod backup;
 mod generate;
 mod portability;
 mod recovery;
+mod security;
 mod totp;
 
 use std::io::{self, Read as _, Write};
@@ -238,6 +239,7 @@ fn run(hardening: passlock_platform::process::ProcessHardening) -> CliResult {
         Some(("backup", sub)) => backup::cmd_backup(sub, &options, &config),
         Some(("export", sub)) => portability::cmd_export(sub, &options, &config),
         Some(("import", sub)) => portability::cmd_import(sub, &options, &config),
+        Some(("security", sub)) => security::cmd_security(sub, &options, &config),
         Some(("recovery", sub)) => recovery::cmd_recovery(sub, &options, &config),
         Some(("keyfile", sub)) => recovery::cmd_keyfile(sub, &options, &config),
         Some(("generate", sub)) => generate::cmd_generate(sub),
@@ -598,6 +600,27 @@ fn build_command() -> Command {
                                 .required(true)
                                 .help("Recopiez l'identifiant : la suppression est irréversible"),
                         ),
+                )
+                .subcommand(
+                    Command::new("expires")
+                        .about("Définit la date d'expiration d'une entrée")
+                        .long_about(
+                            "Écrit un champ « expires_at » (date AAAA-MM-JJ) sur une entrée \
+                             existante.
+
+                             Un champ existant est **remplacé** ; s'il en existe **plusieurs**, \
+                             l'opération est refusée plutôt que d'en choisir un au hasard, et \
+                             rien n'est supprimé en silence.",
+                        )
+                        .arg(vault_argument())
+                        .arg(Arg::new("id").value_name("ID").required(true))
+                        .arg(
+                            Arg::new("date")
+                                .long("date")
+                                .value_name("AAAA-MM-JJ")
+                                .required(true)
+                                .help("Date d'expiration, au format AAAA-MM-JJ"),
+                        ),
                 ),
         )
         .subcommand(
@@ -631,6 +654,7 @@ fn build_command() -> Command {
         .subcommand(backup::command())
         .subcommand(portability::export_command())
         .subcommand(portability::import_command())
+        .subcommand(security::command())
         .subcommand(recovery::recovery_command())
         .subcommand(recovery::keyfile_command())
         .subcommand(generate::generate_command())
@@ -1011,6 +1035,7 @@ fn cmd_entry(
         Some(("rm", sub)) => cmd_entry_trash(sub, options, config),
         Some(("restore", sub)) => cmd_entry_restore(sub, options, config),
         Some(("purge", sub)) => cmd_entry_purge(sub, options, config),
+        Some(("expires", sub)) => cmd_entry_expires(sub, options, config),
         Some(("totp", sub)) => totp::cmd_entry_totp(sub, options, config),
         Some(("gen", sub)) => totp::cmd_entry_gen(sub, options, config),
         _ => Err(CliError("sous-commande « entry » inconnue".to_string())),
@@ -1357,6 +1382,66 @@ fn cmd_entry_purge(
          cela ne peut pas être annulé depuis cette application."
     );
     Ok(())
+}
+
+/// Définit ou remplace la date d'expiration d'une entrée.
+///
+/// La date est validée **avant** toute mutation, et l'écriture passe par
+/// `expiry::set_expires_at`, donc par `update_entry` : elle crée une révision
+/// d'historique et n'emprunte aucun chemin direct vers l'archive.
+fn cmd_entry_expires(
+    matches: &clap::ArgMatches,
+    options: &GlobalOptions,
+    config: &VaultConfig,
+) -> CliResult {
+    let path = vault_path(matches)?;
+    let mut store = open_store(&path, options, config)?;
+    let id = parse_entry_id(matches)?;
+
+    let date = matches
+        .get_one::<String>("date")
+        .ok_or_else(|| CliError("date d'expiration manquante".to_string()))?;
+
+    let outcome = passlock_core::expiry::set_expires_at(&mut store, &id, date)?;
+    // Le succès n'est annoncé qu'**après** une sauvegarde réussie.
+    store.save()?;
+
+    let state = store.archive().entry(&id).map(|entry| {
+        passlock_core::security::expiry_state(
+            &entry.fields,
+            passlock_core::security::CivilDate::from_unix_seconds(now_seconds()),
+            passlock_core::security::DEFAULT_EXPIRY_WINDOW_DAYS,
+        )
+    });
+
+    println!("Expiration de {id} : {date}");
+    eprintln!(
+        "  champ « expires_at » {}",
+        match outcome {
+            passlock_core::expiry::ExpiryWrite::Added => "ajouté",
+            passlock_core::expiry::ExpiryWrite::Replaced => "remplacé",
+        }
+    );
+    if let Some(state) = state {
+        eprintln!("  état : {}", expiry_state_label(state));
+    }
+    Ok(())
+}
+
+/// Libellé français d'un état d'expiration.
+fn expiry_state_label(state: passlock_core::security::ExpiryState) -> &'static str {
+    use passlock_core::security::{ExpiryState, ExpiryUnknown};
+
+    match state {
+        ExpiryState::Expired => "expirée",
+        ExpiryState::Soon => "bientôt expirée",
+        ExpiryState::Valid => "valide",
+        ExpiryState::Unknown(ExpiryUnknown::Absent) => "sans date",
+        ExpiryState::Unknown(ExpiryUnknown::WrongKind) => "type de champ inattendu",
+        ExpiryState::Unknown(ExpiryUnknown::Malformed) => "date mal formée",
+        ExpiryState::Unknown(ExpiryUnknown::Impossible) => "date impossible",
+        ExpiryState::Unknown(ExpiryUnknown::Ambiguous) => "ambiguë",
+    }
 }
 
 /// Recherche dans le coffre.

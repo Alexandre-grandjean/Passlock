@@ -370,6 +370,283 @@ fn hex_symbol(index: u32) -> char {
     char::from(HEX_ALPHABET[(index & 0x0F) as usize])
 }
 
+// ---------------------------------------------------------------------------
+// Punycode (RFC 3492)
+//
+// Punycode est une **bijection** entre une suite de points de code et une chaîne
+// ASCII : il ne dit **rien** de la validité IDNA d'un label. Il est utilisé par
+// l'analyse d'URL comme **mécanisme de conversion** (U-label ↔ A-label), encadré
+// par les règles IDN du module `url.rs` — jamais présenté comme un validateur.
+// ---------------------------------------------------------------------------
+
+/// Base de l'algorithme Punycode.
+const PUNY_BASE: u64 = 36;
+/// Paramètre `tmin`.
+const PUNY_TMIN: u64 = 1;
+/// Paramètre `tmax`.
+const PUNY_TMAX: u64 = 26;
+/// Paramètre `skew`.
+const PUNY_SKEW: u64 = 38;
+/// Paramètre `damp`.
+const PUNY_DAMP: u64 = 700;
+/// Biais initial.
+const PUNY_INITIAL_BIAS: u64 = 72;
+/// Premier point de code non basique.
+const PUNY_INITIAL_N: u64 = 0x80;
+/// Plus grand point de code Unicode admis.
+const PUNY_MAX_CODE_POINT: u64 = 0x10_FFFF;
+
+/// Longueur maximale acceptée pour un label Punycode, en caractères.
+///
+/// Un label DNS fait au plus 63 **octets** en A-label ; cette borne, plus large,
+/// vise la **fonction publique** prise isolément. Elle empêche une entrée hostile
+/// de faire croître une allocation ou de faire boucler le décodage.
+pub const MAX_PUNYCODE_LEN: usize = 1024;
+
+/// Dépassement arithmétique pendant un calcul Punycode.
+fn puny_overflow() -> Error {
+    Error::InvalidInput {
+        reason: "Punycode : dépassement arithmétique sur l'entrée",
+    }
+}
+
+/// Biais adaptatif de la RFC 3492 §6.1.
+fn puny_adapt(mut delta: u64, numpoints: u64, first_time: bool) -> u64 {
+    delta = if first_time {
+        delta / PUNY_DAMP
+    } else {
+        delta / 2
+    };
+    delta += delta / numpoints;
+
+    let mut k = 0_u64;
+    while delta > ((PUNY_BASE - PUNY_TMIN) * PUNY_TMAX) / 2 {
+        delta /= PUNY_BASE - PUNY_TMIN;
+        k += PUNY_BASE;
+    }
+    k + (((PUNY_BASE - PUNY_TMIN + 1) * delta) / (delta + PUNY_SKEW))
+}
+
+/// Chiffre → caractère (`a`–`z`, puis `0`–`9`).
+fn puny_digit_to_char(digit: u64) -> Result<char> {
+    let ascii = match digit {
+        0..=25 => b'a' + u8::try_from(digit).map_err(|_| puny_overflow())?,
+        26..=35 => b'0' + u8::try_from(digit - 26).map_err(|_| puny_overflow())?,
+        _ => {
+            return Err(Error::Internal {
+                invariant: "chiffre Punycode hors de 0..36",
+            });
+        }
+    };
+    Ok(char::from(ascii))
+}
+
+/// Caractère → chiffre. **Minuscules uniquement** : les A-labels sont en
+/// minuscules, et accepter les majuscules créerait deux écritures possibles.
+fn puny_char_to_digit(character: char) -> Option<u64> {
+    match character {
+        'a'..='z' => Some(u64::from(u32::from(character) - u32::from('a'))),
+        '0'..='9' => Some(u64::from(u32::from(character) - u32::from('0')) + 26),
+        _ => None,
+    }
+}
+
+/// Encode un label en **Punycode**, sans le préfixe `xn--`.
+///
+/// C'est la charge utile telle qu'elle suit `xn--` dans un A-label. Un label
+/// entièrement ASCII est encodé suivi d'un **délimiteur** `-` (RFC 3492 §6.3) :
+/// c'est précisément pourquoi un `xn--…` qui décode vers de l'ASCII est refusé par
+/// la couche IDN.
+///
+/// # Erreurs
+/// [`Error::InvalidInput`] si l'entrée dépasse [`MAX_PUNYCODE_LEN`] ou provoque un
+/// dépassement arithmétique.
+#[allow(
+    clippy::many_single_char_names,
+    reason = "les noms `n`, `delta`, `bias`, `k`, `q` sont ceux de la RFC 3492 §6.3 ; les renommer nuirait à la correspondance avec le texte de référence"
+)]
+pub fn punycode_encode(label: &str) -> Result<String> {
+    if label.chars().count() > MAX_PUNYCODE_LEN {
+        return Err(Error::InvalidInput {
+            reason: "label Punycode au-delà de la longueur maximale admise",
+        });
+    }
+
+    let code_points: Vec<u64> = label.chars().map(|c| u64::from(u32::from(c))).collect();
+    let basic: Vec<u64> = code_points.iter().copied().filter(|c| *c < 0x80).collect();
+
+    let mut output = String::new();
+    for &code_point in &basic {
+        let character = u32::try_from(code_point)
+            .ok()
+            .and_then(char::from_u32)
+            .ok_or(puny_overflow())?;
+        output.push(character);
+    }
+
+    let basic_count = u64::try_from(basic.len()).map_err(|_| puny_overflow())?;
+    if basic_count > 0 {
+        output.push('-');
+    }
+
+    let total = u64::try_from(code_points.len()).map_err(|_| puny_overflow())?;
+    let mut n = PUNY_INITIAL_N;
+    let mut delta: u64 = 0;
+    let mut bias = PUNY_INITIAL_BIAS;
+    let mut handled = basic_count;
+
+    while handled < total {
+        let m = code_points
+            .iter()
+            .copied()
+            .filter(|code_point| *code_point >= n)
+            .min()
+            .ok_or(puny_overflow())?;
+
+        delta = delta
+            .checked_add((m - n).checked_mul(handled + 1).ok_or_else(puny_overflow)?)
+            .ok_or_else(puny_overflow)?;
+        n = m;
+
+        for &code_point in &code_points {
+            if code_point < n {
+                delta = delta.checked_add(1).ok_or_else(puny_overflow)?;
+            }
+            if code_point == n {
+                let mut q = delta;
+                let mut k = PUNY_BASE;
+                loop {
+                    let t = k.saturating_sub(bias).clamp(PUNY_TMIN, PUNY_TMAX);
+                    if q < t {
+                        break;
+                    }
+                    output.push(puny_digit_to_char(t + (q - t) % (PUNY_BASE - t))?);
+                    q = (q - t) / (PUNY_BASE - t);
+                    k += PUNY_BASE;
+                }
+                output.push(puny_digit_to_char(q)?);
+                bias = puny_adapt(delta, handled + 1, handled == basic_count);
+                delta = 0;
+                handled += 1;
+            }
+        }
+
+        delta = delta.checked_add(1).ok_or_else(puny_overflow)?;
+        n = n.checked_add(1).ok_or_else(puny_overflow)?;
+    }
+
+    Ok(output)
+}
+
+/// Décode une charge utile Punycode (la partie qui suit `xn--`).
+///
+/// # Erreurs
+/// [`Error::InvalidInput`] si l'entrée dépasse [`MAX_PUNYCODE_LEN`], contient un
+/// chiffre invalide, est tronquée, produit un point de code hors Unicode ou
+/// **basique** (impossible d'après la RFC 3492), ou provoque un dépassement.
+#[allow(
+    clippy::many_single_char_names,
+    reason = "les noms `n`, `i`, `bias`, `k`, `t` sont ceux de la RFC 3492 §6.2 ; les renommer nuirait à la correspondance avec le texte de référence"
+)]
+pub fn punycode_decode(payload: &str) -> Result<String> {
+    if payload.len() > MAX_PUNYCODE_LEN {
+        return Err(Error::InvalidInput {
+            reason: "charge utile Punycode au-delà de la longueur maximale admise",
+        });
+    }
+
+    // Le **dernier** `-` est le délimiteur ; tout ce qui précède est basique.
+    let (basic_part, extended) = match payload.rfind('-') {
+        Some(index) => (&payload[..index], &payload[index + 1..]),
+        None => ("", payload),
+    };
+
+    let mut output: Vec<char> = Vec::new();
+    for character in basic_part.chars() {
+        if !character.is_ascii() {
+            return Err(Error::InvalidInput {
+                reason: "Punycode : point de code basique non ASCII",
+            });
+        }
+        output.push(character);
+    }
+
+    let extended: Vec<char> = extended.chars().collect();
+    let mut position = 0_usize;
+    let mut n = PUNY_INITIAL_N;
+    let mut i: u64 = 0;
+    let mut bias = PUNY_INITIAL_BIAS;
+
+    while position < extended.len() {
+        let old_i = i;
+        let mut weight: u64 = 1;
+        let mut k = PUNY_BASE;
+
+        loop {
+            let character = *extended.get(position).ok_or(Error::InvalidInput {
+                reason: "Punycode : entrée tronquée",
+            })?;
+            position += 1;
+
+            let digit = puny_char_to_digit(character).ok_or(Error::InvalidInput {
+                reason: "Punycode : chiffre invalide",
+            })?;
+
+            i = i
+                .checked_add(digit.checked_mul(weight).ok_or_else(puny_overflow)?)
+                .ok_or_else(puny_overflow)?;
+
+            let t = k.saturating_sub(bias).clamp(PUNY_TMIN, PUNY_TMAX);
+            if digit < t {
+                break;
+            }
+            weight = weight
+                .checked_mul(PUNY_BASE - t)
+                .ok_or_else(puny_overflow)?;
+            k += PUNY_BASE;
+        }
+
+        let out_len = u64::try_from(output.len())
+            .map_err(|_| puny_overflow())?
+            .checked_add(1)
+            .ok_or_else(puny_overflow)?;
+
+        bias = puny_adapt(i - old_i, out_len, old_i == 0);
+        n = n.checked_add(i / out_len).ok_or_else(puny_overflow)?;
+        i %= out_len;
+
+        if n > PUNY_MAX_CODE_POINT {
+            return Err(Error::InvalidInput {
+                reason: "Punycode : point de code hors d'Unicode",
+            });
+        }
+        // RFC 3492 §6.2 : un point de code inséré ne peut pas être basique.
+        if n < 0x80 {
+            return Err(Error::InvalidInput {
+                reason: "Punycode : point de code basique inséré",
+            });
+        }
+        let character =
+            u32::try_from(n)
+                .ok()
+                .and_then(char::from_u32)
+                .ok_or(Error::InvalidInput {
+                    reason: "Punycode : point de code invalide (demi-couple)",
+                })?;
+
+        let index = usize::try_from(i).map_err(|_| puny_overflow())?;
+        if index > output.len() {
+            return Err(Error::InvalidInput {
+                reason: "Punycode : position d'insertion hors bornes",
+            });
+        }
+        output.insert(index, character);
+        i += 1;
+    }
+
+    Ok(output.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,5 +828,71 @@ mod tests {
             "quatre remplissages = zéro octet"
         );
         assert!(base32_decode("M=====").is_err(), "reste 1 impossible");
+    }
+
+    // -- Punycode ------------------------------------------------------------
+
+    #[test]
+    fn known_punycode_vectors_round_trip() {
+        // Exemples canoniques (IDNA) : « bücher » et « münchen ».
+        assert_eq!(punycode_encode("bücher").expect("encodage"), "bcher-kva");
+        assert_eq!(punycode_decode("bcher-kva").expect("décodage"), "bücher");
+        assert_eq!(punycode_encode("münchen").expect("encodage"), "mnchen-3ya");
+        assert_eq!(punycode_decode("mnchen-3ya").expect("décodage"), "münchen");
+    }
+
+    #[test]
+    fn punycode_is_a_bijection_on_unicode_input() {
+        // Aucun vecteur mémorisé : la propriété vérifiée est l'inverse exact.
+        for sample in [
+            "münchen",
+            "bücher",
+            "日本語",
+            "пример",
+            "مرحبا",
+            "🔐",
+            "ünïcödé",
+            "exemple",
+            "a",
+        ] {
+            let encoded = punycode_encode(sample).expect("encodage");
+            let decoded = punycode_decode(&encoded).expect("décodage");
+            assert_eq!(
+                decoded, sample,
+                "aller-retour de « {sample} » via « {encoded} »"
+            );
+        }
+    }
+
+    #[test]
+    fn an_all_ascii_label_gets_the_delimiter() {
+        // C'est ce qui rend un `xn--` décodant vers de l'ASCII détectable.
+        assert_eq!(punycode_encode("exemple").expect("encodage"), "exemple-");
+        assert_eq!(punycode_decode("exemple-").expect("décodage"), "exemple");
+    }
+
+    #[test]
+    fn invalid_punycode_payloads_are_refused() {
+        // Chiffre hors alphabet.
+        assert!(punycode_decode("mnchen-3y!").is_err());
+        // Majuscules refusées : les A-labels sont en minuscules.
+        assert!(punycode_decode("MNCHEN-3YA").is_err());
+        // Entrée tronquée au milieu d'un entier.
+        assert!(punycode_decode("mnchen-3").is_err());
+        // Point de code basique inséré : impossible d'après la RFC.
+        assert!(punycode_decode("a-1").is_err());
+    }
+
+    #[test]
+    fn punycode_inputs_are_bounded() {
+        let huge = "a".repeat(MAX_PUNYCODE_LEN + 1);
+        assert!(punycode_decode(&huge).is_err());
+        assert!(punycode_encode(&huge).is_err());
+    }
+
+    #[test]
+    fn an_empty_punycode_payload_decodes_to_nothing() {
+        assert_eq!(punycode_decode("").expect("décodage"), "");
+        assert_eq!(punycode_encode("").expect("encodage"), "");
     }
 }

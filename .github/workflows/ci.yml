@@ -182,3 +182,23 @@ jobs:
       - name: Fuzzer le décodage des headers de pièce jointe
         run: cargo +nightly fuzz run parse_attachment_blob -- -max_total_time=120 -rss_limit_mb=2048
         working-directory: fuzz
+
+      - name: Fuzzer l'analyse du CSV d'import
+        run: cargo +nightly fuzz run csv_import -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz
+
+      - name: Fuzzer l'analyse de date du centre de sécurité
+        run: cargo +nightly fuzz run parse_civil_date -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz
+
+      - name: Fuzzer l'estimation de robustesse
+        run: cargo +nightly fuzz run estimate_strength -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz
+
+      - name: Fuzzer l'analyse d'URL
+        run: cargo +nightly fuzz run analyze_url -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz
+
+      - name: Fuzzer le codec Punycode
+        run: cargo +nightly fuzz run punycode -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz

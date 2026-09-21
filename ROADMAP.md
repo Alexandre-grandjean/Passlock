@@ -35,7 +35,7 @@ Un seul document définit le contenu d'une phase : celui-ci. Les autres s'y réf
 | **2** | Modèle de données et cœur de stockage | **Terminée et gelée** |
 | **3** | Générateur de secrets et TOTP | **Terminée et approuvée** |
 | **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **Terminée** — 4 étapes livrées ; étape 5 (presse-papiers) **abandonnée** par le gate E.0 |
-| **5** | Centre de sécurité et analyse d'URL | **Non commencée** |
+| **5** | Centre de sécurité et analyse d'URL | **En cours** — étapes 5.1 à 5.4 livrées |
 | **6** | Interface graphique | **Non commencée** |
 | **7** | Durcissement, audit et livrables de release | **Non commencée** |
 
@@ -458,7 +458,42 @@ Ces trois contraintes sont **constitutives** de la phase, pas des préférences.
 
 **État**
 
-- **Non commencée.**
+- **Étape 1 — centre de sécurité (lecture) : livrée et auditée**
+  (`docs/AUDIT_PHASE5_1_CENTRE_SECURITE.md`). Livrés : les **six** indicateurs
+  (réutilisation, ancienneté, estimation de robustesse, entrées faibles, absence de
+  TOTP, expiration) dans `passlock-core/src/security.rs`, en **lecture seule**, sans
+  horloge (l'instant UTC est fourni), sans score global, sans exposer aucune valeur ni
+  empreinte. L'empreinte de réutilisation est un **quatrième usage HMAC de `K_index`**
+  séparé par étiquette (`I-KEYDOMAIN`). L'estimation de robustesse est **nommée comme
+  une heuristique** — jamais une entropie — et son faux négatif est testé. Le format
+  d'archive ne change **pas**.
+- **Étape 2 — analyse d'URL et PSL : livrée et auditée**
+  (`docs/AUDIT_PHASE5_2_ANALYSE_URL.md`). Livrés : une analyse **pure**
+  (`url::analyze`), **explicable par motifs**, **sans score numérique global** ;
+  l'**eTLD+1** via la **PSL embarquée** (`crates/passlock-core/data/public-suffix-list/`,
+  verbatim, commit et SHA-256 épinglés, sections **ICANN et PRIVATE**) ; un codec
+  **Punycode** écrit à la main (RFC 3492) ; les IDN sont **converties, pas validées**
+  (un label non-ASCII ne peut **jamais** produire un verdict `Clean`). **Aucune
+  dépendance nouvelle** — la PSL est une donnée embarquée, pas un crate. Deux défauts
+  corrigés : règles U-label non normalisées, et refus compté comme `Clean`. Le motif
+  « sous-domaine trompeur » est **retiré** faute de référence de marque fiable.
+- **Étape 3 — `expires_at` : livrée et auditée.** Livrés : l'écriture de la date
+  d'expiration via `passlock entry expires`, qui passe par **`update_entry`** — donc
+  validation métier, **révision d'historique** et **aucun** chemin direct vers
+  l'archive. La date est validée **avant toute mutation** ; un champ existant est
+  **remplacé**, et **plusieurs** champs préexistants font **refuser** l'opération
+  plutôt que d'en choisir un — rien n'est supprimé en silence. **Aucun schéma, aucun
+  champ, aucun mécanisme d'historique** nouveau : `expires_at` reste un `Field`
+  clé-valeur ordinaire.
+- **Étape 4 — présentation CLI du centre de sécurité : livrée et auditée**
+  (`docs/AUDIT_PHASE5_4_SECURITY_CLI.md`). Livré : `passlock security`, **couche de
+  présentation** au-dessus de `passlock-core::security`, **strictement en lecture
+  seule** (`read_only` imposé, aucun `save()`). **Aucun score global**, aucun
+  pourcentage, aucun classement ; **aucune valeur de champ** ni **aucune empreinte** de
+  réutilisation n'est affichée ; `Unknown`/`Indeterminate` sont rendus **comme tels**,
+  jamais comme « valide » ou « fort ».
+- **Phase 5 : les quatre étapes sont livrées.** Reste la **clôture** (commit/tag), non
+  faite à ce stade.
 
 ---
 

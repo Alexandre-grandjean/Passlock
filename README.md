@@ -14,17 +14,20 @@ fonctionnalités manquantes.
 > (phase 1), le cœur de stockage — modèle de données, archive, migration, recherche,
 > historique, corbeille (phase 2), le générateur de secrets avec le TOTP (phase 3),
 > la **récupération** — clé de récupération et fichier-clé —, les **pièces jointes**
-> chiffrées, les **sauvegardes** avec test de restauration, et l'**import/export CSV**
-> canonique (phase 4, étapes 1 à 4).
+> chiffrées, les **sauvegardes** avec test de restauration, l'**import/export CSV**
+> canonique (phase 4, étapes 1 à 4), et la **phase 5** (quatre étapes) : le **centre de
+> sécurité** (six indicateurs, sans score global), l'**analyse d'URL locale** (verdict
+> **explicable par motifs**, hors ligne), la définition de **`expires_at`** via
+> `entry expires` — la **seule écriture** de la phase, via `update_entry` —, et leur
+> présentation en lecture seule par **`passlock security`**.
 >
 > Le **presse-papiers** n'est **pas** une fonctionnalité de Passlock : le gate E.0
 > (chaîne d'approvisionnement) a conclu à l'**abandon** — `arboard` aurait exigé
 > d'élargir la liste de licences et d'affaiblir `multiple-versions`, ce qui a été
 > **refusé**. Voir [`docs/AUDIT_PHASE4_5_CLIPBOARD.md`](docs/AUDIT_PHASE4_5_CLIPBOARD.md).
 >
-> N'existent **pas encore** : centre de sécurité et analyse d'URL *(phase 5)* ;
-> interface graphique *(phase 6)* ; audit externe, SBOM et build reproductible
-> *(phase 7)*.
+> N'existent **pas encore** : interface graphique *(phase 6)* ; audit externe, SBOM et
+> build reproductible *(phase 7)*.
 >
 > Le contenu des phases fait autorité dans **[`ROADMAP.md`](ROADMAP.md)**.
 
@@ -267,6 +270,9 @@ techniquement ni juridiquement.
 | [`docs/IMPORT_EXPORT.md`](docs/IMPORT_EXPORT.md) | **Format d'import/export CSV** reproductible : 12 colonnes, échappement contextuel, structure canonique de `fields`, bornes, déterminisme |
 | [`docs/AUDIT_PHASE4_4_IMPORT_EXPORT.md`](docs/AUDIT_PHASE4_4_IMPORT_EXPORT.md) | **Audit de la phase 4, étape 4** : déterminisme de l'export, échappement strict, import transactionnel, bornes avant allocation |
 | [`docs/AUDIT_PHASE4_5_CLIPBOARD.md`](docs/AUDIT_PHASE4_5_CLIPBOARD.md) | **Gate E.0 — presse-papiers** : abandon (P3). Ce que `cargo deny` a mesuré, pourquoi P1 et P2 sont écartés, et pourquoi **aucune dépendance clipboard n'a été ajoutée** |
+| [`docs/AUDIT_PHASE5_1_CENTRE_SECURITE.md`](docs/AUDIT_PHASE5_1_CENTRE_SECURITE.md) | **Audit de la phase 5, étape 1** : centre de sécurité (six indicateurs), heuristique assumée, et un débordement trouvé par le fuzzing |
+| [`docs/AUDIT_PHASE5_2_ANALYSE_URL.md`](docs/AUDIT_PHASE5_2_ANALYSE_URL.md) | **Audit de la phase 5, étape 2** : analyse d'URL pure, PSL embarquée épinglée, IDN converties mais **pas** validées, et deux défauts corrigés |
+| [`docs/AUDIT_PHASE5_4_SECURITY_CLI.md`](docs/AUDIT_PHASE5_4_SECURITY_CLI.md) | **Audit de la phase 5, étape 4** : présentation `security` en lecture seule — aucun secret, aucune empreinte, aucune écriture, aucune incertitude embellie |
 | [`docs/AUDIT_PHASE3.md`](docs/AUDIT_PHASE3.md) | Audit adversarial du générateur et du TOTP : 35 vecteurs RFC, fuzzing, secret en mémoire, défauts trouvés |
 | [`docs/AUDIT_PHASE2_SEMANTIQUE.md`](docs/AUDIT_PHASE2_SEMANTIQUE.md) | **Audit sémantique** du magasin par modèle de référence : 9 500 opérations comparées, 18 invariants |
 | [`docs/AUDIT_PHASE2.md`](docs/AUDIT_PHASE2.md) | Audit adversarial du cœur de stockage |
@@ -335,10 +341,17 @@ passlock export COFFRE --output export.csv     # fichier neuf en 0600, jamais é
 # Un import valide TOUT avant d'écrire : un CSV refusé laisse le coffre inchangé
 passlock import COFFRE --input export.csv
 
+# Le centre de sécurité : six indicateurs, en lecture seule, sans score global
+passlock security COFFRE          # aucun secret et aucune empreinte ne sont affichés
+
 # Le fuzzing, cible par cible (nightly requis)
 cd fuzz && cargo +nightly fuzz run parse_recovery_key --  -max_total_time=60
 cd fuzz && cargo +nightly fuzz run parse_attachment_blob -- -max_total_time=60
 cd fuzz && cargo +nightly fuzz run csv_import -- -max_total_time=60
+cd fuzz && cargo +nightly fuzz run parse_civil_date -- -max_total_time=60
+cd fuzz && cargo +nightly fuzz run estimate_strength -- -max_total_time=60
+cd fuzz && cargo +nightly fuzz run analyze_url -- -max_total_time=60
+cd fuzz && cargo +nightly fuzz run punycode -- -max_total_time=60
 ```
 
 ## État de vérification

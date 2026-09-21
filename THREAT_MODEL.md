@@ -93,7 +93,7 @@ phases fait autorité dans [`ROADMAP.md`](ROADMAP.md).
 | T11 | Retour vers un coffre à KDF faible | Critique | Faible | la sentinelle détecte la régression de génération ; la migration incrémente la génération | ne détecte pas un coffre ancien sans sentinelle préalable | **F1** |
 | T12 | Malware local non privilégié | Critique | **Élevée** | réduction de surface : aucun réseau, aucune extension navigateur, permissions 0600, verrou de fichier | accès complet au coffre **pendant** qu'il est déverrouillé | **F1** (partiel) |
 | T13 | Keylogger | Critique | Élevée | saisie sans écho ; rien d'autre n'est fiable | **aucune défense réelle** contre un hook clavier | — |
-| T14 | Détournement du presse-papiers | Élevé | Moyenne | effacement temporisé **avec vérification avant écrasement** | gestionnaires d'historique ; sur Wayland la relecture est refusée | **F4** |
+| T14 | Détournement du presse-papiers | Élevé | Moyenne | **aucune : Passlock ne copie rien dans le presse-papiers** | le presse-papiers reste un canal public, mais **aucun secret n'y est jamais placé** | **abandonné** — gate E.0 (`docs/AUDIT_PHASE4_5_CLIPBOARD.md`) |
 | T15 | Capture d'écran | Élevé | Moyenne | `WDA_EXCLUDEFROMCAPTURE` sur **Windows uniquement** ; délai avant révélation | **aucun équivalent Linux** ; un appareil photo contourne tout | **F6** |
 | T16 | Lecture de mémoire par un processus privilégié | Critique | Faible | `zeroize`, `mlock`, `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`, `MADV_DONTDUMP` | `ptrace` en `root` lit tout. Défense **impossible** contre Ad4 | F1 (partiel) |
 | T17 | Navigateur compromis | Critique | Moyenne | **aucune intégration navigateur** ; le coffre n'écoute sur aucun socket | hors périmètre par choix, pas par oubli | — |
@@ -110,8 +110,8 @@ phases fait autorité dans [`ROADMAP.md`](ROADMAP.md).
 | T28 | Chemin contrôlé par l'utilisateur | Élevé | Moyenne | un titre d'entrée n'est jamais un chemin ; jetons aléatoires pour les fichiers internes ; octets nuls refusés | le répertoire choisi par l'utilisateur reste sous sa responsabilité | **F1** |
 | T29 | Corruption du magasin | Élevé (disponibilité) | Faible | **il n'y a plus de base de données** : SQLite a été abandonné en phase 2 (ADR-020). Le décodage d'archive est **borné et vérifié** ; l'écriture du conteneur est atomique | une corruption du contenu reste un défaut du programme, pas un scénario exploitable ; une corruption du **fichier** est détectée par le tag AEAD. *Cette ligne décrivait une base SQLite : elle était devenue fausse* | **F2** |
 | T30 | Compromission physique du périphérique | Critique | Faible | chiffrement au repos, verrouillage automatique | DMA, cold boot, puce espionne : hors périmètre | — |
-| T31 | Perte totale de l'appareil | Élevé (disponibilité) | Moyenne | sauvegarde + **test de restauration** + clé de récupération | sans sauvegarde ni clé de récupération, la perte est **définitive** | **F4.1 partiel** — clé de récupération **livrée** ; sauvegardes et test de restauration à l'étape 3 |
-| T32 | Traversée de chemin / zip slip | Élevé | Faible | assainissement des noms, `O_EXCL`, écriture dans un répertoire créé par nous. **Pour les pièces jointes** : un nom d'entrée n'est **jamais** un chemin — le fichier porte un nom dérivé par HMAC d'un identifiant aléatoire, et la restauration refuse d'écraser une cible | la traversée reste possible pour un **chemin choisi par l'utilisateur** (`attach add`, `attach get --output`), qui est sa responsabilité | **F4.2** (pièces jointes ; import/export à l'étape 4) |
+| T31 | Perte totale de l'appareil | Élevé (disponibilité) | Moyenne | sauvegarde + **test de restauration** + clé de récupération | sans sauvegarde ni clé de récupération, la perte est **définitive** | **F4.1–F4.3 livrés** — clé de récupération, sauvegardes et test de restauration **livrés** |
+| T32 | Traversée de chemin / zip slip | Élevé | Faible | assainissement des noms, `O_EXCL`, écriture dans un répertoire créé par nous. **Pour les pièces jointes** : un nom d'entrée n'est **jamais** un chemin — le fichier porte un nom dérivé par HMAC d'un identifiant aléatoire, et la restauration refuse d'écraser une cible | la traversée reste possible pour un **chemin choisi par l'utilisateur** (`attach add`, `attach get --output`), qui est sa responsabilité | **F4.2–F4.4** (pièces jointes et import/export **livrés**) |
 
 ## 5. Scénarios d'attaque détaillés
 
@@ -244,6 +244,12 @@ employé sans qualifier l'adversaire et les conditions.**
     d'une clé à qui détient le pouvoir physique.
 11. **Il n'existe aucune limitation du nombre de tentatives de déverrouillage.** Une
     interface qui réessaierait en boucle consommerait du temps CPU proportionnel.
+12. **Un centre de sécurité vide ne prouve rien.** Les six indicateurs sont **bornés** :
+    l'estimation de robustesse est aveugle aux dictionnaires (L34), l'analyse d'URL ne
+    valide **pas** IDNA et ne détecte **pas** l'usurpation de marque (L35), et aucune
+    vérification n'interroge de base de fuites en ligne. L'absence de signal n'est
+    **pas** une preuve de sécurité — et aucun score global n'est produit pour en donner
+    l'illusion (L37, `docs/AUDIT_PHASE5_4_SECURITY_CLI.md`).
 
 ## 8. Surface d'attaque
 

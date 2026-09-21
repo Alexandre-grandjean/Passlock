@@ -192,6 +192,10 @@ un suivi explicite.
 | L31 | **Le verrou de sauvegarde ne protège pas d'un accès hors de Passlock.** Un tiers peut lire le coffre pendant la copie | lecture concurrente par un processus non-Passlock | le conteneur reste chiffré ; le verrou protège la **cohérence de l'ensemble**, pas la confidentialité. Un lecteur Passlock n'est d'ailleurs **pas** bloqué, et c'est voulu |
 | L32 | **Un export CSV est en clair, et volontairement incomplet.** Il contient identifiants et secrets sans chiffrement, et n'embarque ni pièces jointes, ni historique, ni corbeille | le fichier exporté est lisible par quiconque y accède ; il ne permet pas de reconstruire un coffre à l'identique | dit à chaque export (avertissement), et documenté (`docs/IMPORT_EXPORT.md` §1 et §9). La destination est **obligatoire** (jamais de sortie par défaut), le fichier est créé en **exclusif** avec permissions `0600` et jamais écrasé. **Un export n'est pas une sauvegarde** — pour cela, `backup` |
 | L33 | **Le presse-papiers est abandonné, et non reporté.** Passlock ne copie rien dans le presse-papiers | aucune : la fonctionnalité **n'existe pas** et n'existera pas | le gate E.0 a conclu **P3** (`docs/AUDIT_PHASE4_5_CLIPBOARD.md`) : `arboard` aurait exigé d'**élargir** la liste de licences de `deny.toml` (`Zlib`, `Unicode-3.0`, `BSL-1.0`) et d'**affaiblir** `multiple-versions` (`hashbrown`, `windows-sys`) — un affaiblissement de la chaîne d'approvisionnement **refusé**. **Aucune dépendance clipboard**, **aucun code**. Un canal **public par conception** n'aurait de toute façon rien garanti (`docs/TOTP.md` §8) |
+| L37 | **Un centre de sécurité vide ne prouve rien.** L'absence de signal n'est pas l'absence de risque : les six indicateurs sont limités (L34, L35) et ne couvrent ni les fuites en ligne, ni les secrets devinables par dictionnaire | l'utilisateur pourrait lire un rapport vide comme « coffre sûr » | la commande affiche une ligne de pied explicite, et **aucun** score global n'est produit : chaque indicateur est une liste de faits (`docs/AUDIT_PHASE5_4_SECURITY_CLI.md`) |
+| L36 | **`expires_at` n'est pas appliqué par le coffre.** C'est une date **informative** : Passlock n'efface, ne masque et ne refuse **jamais** une entrée parce qu'elle est expirée | un utilisateur pourrait croire qu'une entrée expirée est « désactivée » | le centre de sécurité la **signale** ; il ne corrige ni ne supprime à la place de l'utilisateur (`ROADMAP.md` §5.3). Aucune action automatique |
+| L35 | **L'analyse d'URL ne valide pas IDNA et ne détecte pas l'usurpation de marque.** Aucune table IDNA2008, pas de NFC, pas de Bidi ; et **aucune liste de marques** n'est embarquée | un label non-ASCII n'est **jamais** déclaré `Clean` (limite assumée) ; à l'inverse, un homographe de marque (`rnicrosoft.com`) **n'est pas** signalé | dit dans le type (`IdnaNotFullyValidated`) et les tests : `münchen.de` et `xn--mnchen-3ya.de` sont `Indeterminate`. Le motif « sous-domaine trompeur » est **retiré** faute de référence fiable ; le repli confusable est **exposé pour comparer**, jamais érigé en motif seul (`docs/AUDIT_PHASE5_2_ANALYSE_URL.md`) |
+| L34 | **L'estimation de robustesse du centre de sécurité n'est pas une entropie.** Elle compte des plages de caractères et des classes ASCII observées, et ignore les dictionnaires | un secret humain faible peut **ne pas** être signalé (mot de dictionnaire à classes variées) ; à l'inverse, l'alarme n'est fiable que dans un sens | dit dans le type (`StrengthEstimate`) et **testé** : `Tr0ub4dor&3` n'est pas signalé. Seul un score **bas** est un signal ; un score **haut** ne garantit rien. Le verdict haut s'appelle `NoStructuralWeakness`, jamais « fort » (`docs/AUDIT_PHASE5_1_CENTRE_SECURITE.md`) |
 | L28 | **L'intégrité d'une pièce jointe est portée par son propre AEAD, et non par l'AAD du conteneur.** Un blob vit hors du fichier de coffre, donc hors de la portée de son tag | un blob supprimé par un tiers ne casse **aucun** tag : l'absence n'est constatée que par `attach verify`, qui la signale comme une incohérence | dit explicitement dans `docs/ATTACHMENT_FORMAT.md` §5.1. Une absence est une **erreur d'intégrité**, jamais un déchet : elle n'est pas candidate au ramasse-miettes. Un blob corrompu ou absent reste **référencé**, donc préservé |
 | L29 | **Une sauvegarde du seul fichier de coffre ne préserve pas les pièces jointes.** Les blobs vivent hors du conteneur | restaurer un coffre sans son répertoire `.attachments/` donne un coffre dont les pièces jointes sont **absentes** — incohérence détectée, jamais silencieuse | dit à chaque `attach add`. Le chantier « sauvegardes » (étape 3) doit inclure le répertoire des blobs ; la vérification de restauration doit rejouer le contrôle des blobs |
 | L27 | **La durabilité de l'entrée de répertoire n'est pas revendiquée sous Windows.** `make_durable` y retourne `FileOnly` : le contenu est synchronisé, pas le nom | après une coupure d'alimentation, une pièce jointe peut manquer alors que le coffre la référence — une **promesse non tenue** | le niveau est **rendu** par la primitive (`Durability`, `#[must_use]`) et **rapporté à l'ouverture** du coffre, jamais tu. L'absence est détectée par `attach verify` (étape 2). Reprise en phase 7 avec un exécuteur Windows réel |
@@ -407,6 +411,54 @@ De l'**échange de données en clair** : un fichier CSV lisible par n'importe qu
 | **Colonne `fields`** | structure textuelle à clés fixes | grammaire canonique stricte : clés dans l'ordre, espaces interdits, `\u` non canonique et `\u0000` refusés, **une seule écriture par valeur** (`docs/IMPORT_EXPORT.md` §4) |
 | **Import transactionnel** | une écriture de masse déclenchée par un fichier | **tout** est validé avant la moindre mutation, puis **un seul** `save()`. Un CSV refusé laisse le coffre **strictement inchangé** — ni entrée, ni dossier, ni tag |
 | **Coexistence** | un import s'ajoute aux données existantes | dossiers et tags de même nom **réutilisés**, identifiants internes **neufs** : l'import ne « restaure » pas un coffre, il y verse des entrées |
+
+### 4.15 Ce que la phase 5, étape 4, a ajouté comme surface
+
+Une **couche de présentation** en lecture seule : `passlock security`.
+
+| Surface | Nature | Traitement |
+|---|---|---|
+| **Lecture seule imposée** | une commande qui ouvre un coffre | `read_only` **écrasé dans le code** ; **aucun** `save()` ; testé par comparaison des octets du coffre **et** de la liste des fichiers |
+| **Aucune valeur, aucune empreinte** | une sortie qui parle de secrets | n'affiche que des identifiants, des **titres**, des **clés de champ**, des ordinals, des compteurs et des dates ; un test vérifie l'absence de tout jeton de 64 caractères hexadécimaux |
+| **Aucun verdict** | une présentation qui pourrait rassurer | pas de score, pas de pourcentage, pas de classement ; une ligne de pied dit que l'absence de signal n'est **pas** une preuve (L37) |
+| **Incertitude affichée** | `Unknown` / `Indeterminate` | rendus **comme tels**, jamais comme « valide » ou « fort » |
+
+### 4.14 Ce que la phase 5, étape 3, a ajouté comme surface
+
+**Une écriture** — la seule de la phase : définir la date d'expiration d'une entrée.
+
+| Surface | Nature | Traitement |
+|---|---|---|
+| **Écriture via `update_entry`** | une modification d'entrée | **aucun** chemin direct vers l'archive, **aucun** `save()` ad hoc : la validation métier, la révision et l'historique sont ceux du magasin |
+| **Validation avant mutation** | une date fournie par l'utilisateur | analysée **avant** la transaction ; une date invalide ne laisse **rien** derrière elle |
+| **Unicité** | plusieurs champs `expires_at` pourraient coexister | après écriture, **un seul** ; plusieurs champs préexistants font **refuser** l'opération plutôt que d'en choisir un — rien n'est supprimé en silence |
+| **Donnée fournie** | `expires_at` est une date saisie | aucune durée n'est déduite ni inventée ; le coffre ne l'**applique pas** (L36) |
+
+### 4.13 Ce que la phase 5, étape 2, a ajouté comme surface
+
+Une **analyse d'URL locale et pure**, sans réseau ni E/S, et une **donnée embarquée**
+(la liste des suffixes publics).
+
+| Surface | Nature | Traitement |
+|---|---|---|
+| **Analyse pure** | prend une chaîne, rend un verdict | aucun réseau, DNS, WHOIS, certificat ni réputation ; **aucune** E/S, **aucune** horloge, **aucun** coffre. Entrée bornée à 4096 octets ; un test **structurel** vérifie l'absence de `std::net`/`std::fs`/`std::io` dans la source |
+| **Verdict explicable** | une liste de motifs, jamais un score | `Clean`/`Suspicious`/`Indeterminate`/`NotApplicable`, dérivés des motifs. Aucun « score de sécurité », aucun verdict « phishing » |
+| **PSL embarquée** | donnée tierce (MPL-2.0) en `include_str!` | **aucun** réseau au build ni à l'exécution, **aucune** mise à jour automatique ; commit, date, taille et SHA-256 épinglés, empreinte vérifiée par un test |
+| **IDN : conversion, pas validation** | un A-label `xn--…` peut ressembler à une validation | **aucune** IDNA2008 (ni tables, ni NFC, ni Bidi) : un label non-ASCII produit `IdnaNotFullyValidated` et un verdict **`Indeterminate`**, jamais `Clean` (L35) |
+| **Confusables** | un repli pourrait passer pour un détecteur d'usurpation | le repli est **exposé pour comparer**, il ne produit **aucun motif seul** ; **aucune liste de marques** inventée. Le motif « sous-domaine trompeur » est **retiré** (L35) |
+| **Bornes** | une entrée hostile ne doit pas coûter | entrée 4096 octets, 16 labels, label 63 octets **A-label**, hôte 253 octets **A-label** ; fuzzé (`analyze_url`, `punycode`) |
+
+### 4.12 Ce que la phase 5, étape 1, a ajouté comme surface
+
+Un **centre de sécurité** qui lit le coffre déverrouillé et n'écrit rien.
+
+| Surface | Nature | Traitement |
+|---|---|---|
+| **Empreinte de réutilisation** | une fonction de la valeur d'un secret, calculée sous `K_index` | **jamais** persistée, **jamais** affichée ; la comparaison reste en mémoire. Quatrième usage HMAC de `K_index`, séparé par l'étiquette `passlock/v1/reuse-fingerprint` (`I-KEYDOMAIN`) : aucune clé nouvelle |
+| **Lecture seule** | le centre observe, il ne modifie rien | **aucune** écriture, **aucune** horloge : l'instant de référence est **fourni** (UTC) |
+| **Estimation de robustesse** | un chiffre qui pourrait être pris pour une entropie | le type et le nom disent **heuristique** ; le verdict haut s'appelle `NoStructuralWeakness`, jamais « fort ». Le faux négatif (`Tr0ub4dor&3`) est **testé** et documenté (L34) |
+| **Absence de TOTP** | un signalement par entrée | règle **conservatrice** (`Login` + `Secret` + aucun `Totp`) ; un faux positif (un `Secret` qui n'est pas un mot de passe) est **documenté** |
+| **`expires_at`** | une date **fournie par l'utilisateur** | aucune durée n'est déduite ni inventée ; le format **ne change pas** — c'est un `Field` ordinaire ; la future écriture passera par `update_entry` |
 
 ### 4.9 Ce que la phase 4, étape 2, a ajouté comme surface
 
@@ -669,7 +721,10 @@ principal** que chaque phase introduit, et où il est traité.
 | 4 *(étape 3, livrée)* | **une sauvegarde antérieure survit à une révocation de slot** et à une suppression d'entrée ; **une destination partielle occupe le chemin** (L30) ; **le test de restauration ne doit rien écrire** ; un nettoyage qui se tromperait de cible détruirait des données **d'autrui** | §4.10, L30, L31, `docs/BACKUP.md`, `docs/AUDIT_PHASE4_3_SAUVEGARDES.md` |
 | 4 *(étape 2, livrée)* | **une sauvegarde du seul fichier de coffre perd les pièces jointes** (L29) ; **l'AEAD ne détecte pas une troncature propre** — c'est la métadonnée qui le fait (L28) ; un **ramasse-miettes** qui se tromperait de catégorie détruirait des données | §4.9, L28, L29, `docs/ATTACHMENT_FORMAT.md`, `docs/AUDIT_PHASE4_2_PIECES_JOINTES.md` |
 | 4 *(étape 1, livrée)* | **un slot supplémentaire est un chemin d'entrée de plus** — récupérabilité et résistance au vol varient en sens inverse ; **le fichier-clé n'est pas un facteur matériel** (L26) ; **la durabilité réduite sous Windows** peut laisser une promesse non tenue après coupure (L27) ; un secret affiché sur stdout est redirigeable | §4.8, §8, L26, L27, `docs/AUDIT_PHASE4_1_RECUPERATION.md` |
-| 5 | **faux sentiment de protection** — un centre de sécurité qui rassure sans rien garantir ; regroupement de domaines par eTLD+1 erroné dans certains cas, notamment sur un suffixe absent d'une liste vieillissante (L25) ; `expires_at` est le **seul** élément de la phase qui écrit dans les entrées, et il écrit une donnée fournie par l'utilisateur | à traiter **en phase 5** ; décisions déjà tranchées en `ROADMAP.md` §5.3 et §5.4 |
+| 5 *(étape 2, livrée)* | **faux sentiment de protection** — l'analyse d'URL ne valide pas IDNA et ne détecte pas l'usurpation de marque (L35) ; l'eTLD+1 est **incertain** sur un suffixe absent d'une liste vieillissante (L25) | §4.13, L25, L35, `docs/AUDIT_PHASE5_2_ANALYSE_URL.md` |
+| 5 *(étape 4, livrée)* | **un rapport vide rassure à tort** (L37) ; **un secret ou une empreinte pourrait fuiter par l'affichage** | §4.15, L37 ; aucun score, aucune valeur, aucune empreinte, et l'incertitude est affichée comme telle |
+| 5 *(étape 3, livrée)* | `expires_at` est le **seul** élément de la phase qui écrit dans les entrées, et il écrit une donnée **fournie par l'utilisateur** ; plusieurs champs pourraient coexister | §4.14, L36 ; l'ambiguïté est **refusée** sans suppression, l'écriture passe par `update_entry`, et la date n'est **jamais** appliquée par le coffre |
+| 5 *(étape 1, livrée)* | **un centre de sécurité qui rassure sans rien garantir** — l'estimation de robustesse est aveugle aux dictionnaires (L34) ; l'absence de TOTP peut sur-signaler ; l'empreinte de réutilisation est une fonction de la valeur (jamais persistée ni affichée) | §4.12, L34, `docs/AUDIT_PHASE5_1_CENTRE_SECURITE.md` |
 | 6 | webview ; IPC ; CSP ; **extension de la durée de vie de la clé en mémoire** par la session déverrouillée | à traiter **en phase 6**, et à documenter ici |
 | 7 | **un audit externe non réalisé alors que le produit se présente comme vérifié** | §Statut, L10 |
 

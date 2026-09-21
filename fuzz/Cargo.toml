@@ -73,3 +73,31 @@ path = "fuzz_targets/csv_import.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parse_civil_date"
+path = "fuzz_targets/parse_civil_date.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "estimate_strength"
+path = "fuzz_targets/estimate_strength.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "analyze_url"
+path = "fuzz_targets/analyze_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "punycode"
+path = "fuzz_targets/punycode.rs"
+test = false
+doc = false
+bench = false

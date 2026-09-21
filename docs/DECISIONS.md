@@ -1289,3 +1289,177 @@ entre machines. Le mécanisme n'aurait apporté **aucune garantie de sécurité*
 **Ce qui n'est PAS revendiqué comme vérifié.** L'exécution **Windows n'a pas été
 réalisée** ; le doublon `windows-sys` est constaté par **résolution** (`cargo tree`,
 `cargo deny`), pas par exécution. La CI n'a pas été lancée sur ce dépôt.
+
+---
+
+## ADR-038 — Centre de sécurité : six indicateurs, une heuristique assumée
+
+**Statut :** accepté, **avec des limites nommées**
+
+**Problème.** Rendre visible, **hors ligne**, l'état de sécurité des secrets déjà
+stockés — sans ajouter de secret, de primitive ni de dépendance, et sans donner un
+**faux sentiment de protection**.
+
+**Décision.** Un module `security.rs` en **lecture seule** sur `Archive`, calculant
+**six** indicateurs : réutilisation, ancienneté, estimation de robustesse, entrées
+faibles, absence de TOTP, expiration. **Aucun score global**, aucune agrégation.
+**Aucune écriture**, **aucune horloge** (l'instant UTC est **fourni**). Le format
+d'archive ne change **pas**.
+
+**L'estimation de robustesse n'est pas une entropie.** La phase 3 calcule une entropie
+**exacte** quand elle connaît la longueur, l'alphabet et les contraintes ; ces
+hypothèses n'existent pas pour un secret **choisi par un humain**. Le module ne les
+invente pas : il compte `n` (scalaires Unicode), `A` (union des classes ASCII
+observées), `run_count` (plages maximales de caractères identiques adjacents), et rend
+`heuristic_bits = run_count × log₂(A)`. Le nom, le type et le verdict haut
+(`NoStructuralWeakness`) disent tous **heuristique**, jamais « fort ». L'estimation est
+**aveugle aux dictionnaires** : `Tr0ub4dor&3` n'est pas signalé, et **un test l'énonce**.
+`Entropy::unconstrained` n'est **pas** réutilisée — ses hypothèses manquent.
+
+**Réutilisation : une empreinte sous `K_index`.** `HMAC-SHA256(K_index,
+"passlock/v1/reuse-fingerprint" ‖ valeur)`, valeur prise **verbatim** (égalité exacte,
+aucune normalisation). C'est un **quatrième usage HMAC de `K_index`**, séparé par
+étiquette en préfixe de message : le motif d'`I-KEYDOMAIN`, sans clé nouvelle ni
+changement de format. Jamais persistée, jamais affichée ; un groupe n'est signalé que
+s'il couvre **au moins deux entrées distinctes**.
+
+**`expires_at` : une donnée fournie, jamais déduite.** Un `Field` ordinaire,
+`FieldKind::Date`, `YYYY-MM-DD` strict, année `1970..=9999`. États : `expired` (delta
+< 0), `soon` (0..=30), `valid` (> 30), `unknown` (absent, mauvais genre, mal formé,
+impossible, ambigu). La fenêtre est un **paramètre affiché**, pas une constante cachée ;
+la comparaison se fait par **numéro de jour**, sur une référence **UTC fournie**.
+
+**Limites nommées.** **L34** : l'estimation n'est fiable que dans un sens — un score
+bas est un signal, un score haut ne garantit rien. Le faux positif d'absence de TOTP
+(un `Secret` qui n'est pas un mot de passe) est **documenté**.
+
+**Défaut trouvé par le fuzzing.** `CivilDate::from_days` n'était **pas totale** : elle
+débordait sur une entrée proche de `i64::MAX`. Elle est désormais **bornée**, et le
+résultat ramené au domaine `1970..=9999`. Détail dans
+`docs/AUDIT_PHASE5_1_CENTRE_SECURITE.md`.
+
+---
+
+## ADR-039 — Analyse d'URL : pure, bornée, explicable — et sans prétendre valider IDNA
+
+**Statut :** accepté, **avec des limites nommées**
+
+**Problème.** Signaler les sites trompeurs **sur la seule chaîne de l'URL**, sans
+réseau, sans DNS, sans coffre, et sans introduire de **faux sentiment de protection**.
+Et décider d'où vient la liste des suffixes publics.
+
+**Décision.** Un module `url.rs` **pur** : entrée `&str`, sortie `UrlVerdict` —
+`Clean`/`Suspicious`/`Indeterminate`/`NotApplicable`, **dérivé d'une liste de motifs**,
+**jamais d'un score**. Aucune E/S, aucun réseau, aucune horloge, aucun coffre. Bornes :
+entrée 4096 octets, 16 labels, label 63 octets **A-label**, hôte 253 octets **A-label**.
+
+**PSL embarquée, pas un crate.** `public_suffix_list.dat` est **verbatim** sous
+`data/public-suffix-list/`, embarqué par `include_str!`, avec `ATTRIBUTION.md`
+(commit amont, date, taille, SHA-256) et un test d'empreinte. **Aucun réseau au build
+ni à l'exécution**, **aucune** mise à jour automatique : le graphe de crates du cœur et
+la liste blanche de `deny.toml` restent **inchangés**. Les **deux sections** (ICANN et
+PRIVATE) sont utilisées : `github.io` est un suffixe public, donc `a.github.io` et
+`b.github.io` sont deux sites distincts.
+
+**La liste mêle A-labels et U-labels.** 459 règles sont en **U-label**
+(`aéroport.ci`, `公司.cn`) ; l'hôte étant analysé en A-label, les règles sont
+**normalisées en A-label au chargement**. Sans cela, une règle Unicode ne
+correspondrait **jamais** — un défaut silencieux (D1 de l'audit).
+
+**IDN : conversion, pas validation.** Le codec **Punycode** (RFC 3492) est écrit à la
+main, dans `encoding.rs` — mais le Punycode est une **bijection**, pas un validateur.
+Le module **n'implémente pas** IDNA2008/UTS#46 : pas de tables de points de code, pas de
+**NFC**, pas de Bidi/ContextJ. Conséquence **assumée** : un label non-ASCII produit
+`IdnaNotFullyValidated` et un verdict **`Indeterminate`**, **jamais** `Clean`. Un faux
+`xn--` est refusé par la grammaire, le refus du décodage vers de l'ASCII, et
+l'**aller-retour** décodage/ré-encodage.
+
+**Ce qui n'est pas implémenté, et pourquoi.** Aucune **liste de marques** n'est
+embarquée ; donc aucune détection d'**homographe de marque** et **aucun** motif
+« sous-domaine trompeur ». La règle initialement envisagée — « suffixe PSL en position
+non finale » — était **trop large** : `foo.com.br` aurait été signalé, parce que `com`
+est lui-même une règle. Le motif est donc **retiré**, et le repli confusable est
+**exposé pour comparer** (`fold_confusables`, `is_confusable_with`) plutôt qu'érigé en
+motif seul. **L35** nomme la limite.
+
+**Ce qu'un motif ne dit pas.** `Suspicious` signale une **anomalie structurelle**
+(écritures mêlées, userinfo, excès de labels), **pas** un « phishing ». Aucun verdict
+n'accuse une marque, et aucun score composite n'est calculé.
+
+**Défauts trouvés.** D1 (règles U-label non normalisées) et D2 (un refus structurel
+compté comme `Clean`), tous deux corrigés et couverts par des tests. Détail dans
+`docs/AUDIT_PHASE5_2_ANALYSE_URL.md`.
+
+---
+
+## ADR-040 — `expires_at` : une écriture par le chemin métier, et l'ambiguïté refusée
+
+**Statut :** accepté, sans limite nouvelle
+
+**Problème.** La phase 5 est **en lecture seule** partout, sauf un point : définir la
+date d'expiration d'une entrée. Comment écrire **sans** introduire de chemin parallèle,
+ni de schéma, ni de mécanisme d'historique — et sans masquer une donnée ambiguë ?
+
+**Décision.** Une fonction `expiry::set_expires_at`, et une commande
+`passlock entry expires`. L'écriture passe **exclusivement** par
+[`VaultStore::update_entry`](crate::store::VaultStore::update_entry) : validation
+métier, révision et historique sont ceux du magasin. **Aucun** accès direct à
+l'archive, **aucun** `save()` ad hoc.
+
+**Validation avant mutation.** La date (`YYYY-MM-DD`, année `1970..=9999`) est analysée
+**avant** d'ouvrir la transaction : une date mal formée, hors bornes ou impossible ne
+laisse **rien** derrière elle.
+
+**Unicité, et refus de l'ambiguïté.** Après une écriture réussie, l'entrée porte
+**exactement un** champ `expires_at` : absent → ajout ; présent → remplacement (le
+genre et l'ordinal d'origine sont normalisés et conservés). **Plusieurs** champs
+préexistants ne sont **jamais** départagés arbitrairement : l'opération est **refusée**,
+et rien n'est supprimé. Choisir « le premier » aurait masqué une ambiguïté que
+l'analyse de sécurité signale déjà (`ExpiryUnknown::Ambiguous`).
+
+**Aucun format nouveau.** `expires_at` reste un `Field` clé-valeur ordinaire, de genre
+`Date` : ni schéma, ni section, ni type, ni mécanisme d'historique nouveaux.
+
+**La date n'est pas appliquée.** Le coffre ne supprime ni ne masque une entrée expirée :
+`expires_at` est une donnée **informative** (**L36**). Le centre de sécurité la signale,
+il ne corrige pas à la place de l'utilisateur.
+
+**Détails d'interface.** La valeur écrite est la forme **canonique** de la date
+(`CivilDate` affiche `YYYY-MM-DD`), et l'état résultant (`expired`/`soon`/`valid`) est
+affiché sur la **sortie d'erreur**, jamais sur la sortie standard.
+
+---
+
+## ADR-041 — Présentation du centre de sécurité : une couche, pas un verdict
+
+**Statut :** accepté, **avec une limite nommée**
+
+**Problème.** Présenter six indicateurs sans recoder de logique, sans laisser fuiter de
+secret, et sans transformer une **incertitude** en **feu vert**.
+
+**Décision.** Une commande `passlock security COFFRE`, **couche de présentation** pure
+au-dessus de `passlock_core::security` : **aucun recalcul**, aucune logique de sécurité
+dupliquée. Elle ouvre le coffre en **lecture seule imposée** (`read_only` écrasé dans le
+code) et n'appelle **jamais** `save()`.
+
+**Ce qui n'est jamais affiché.** Aucune **valeur** de champ, aucun secret, aucune
+**empreinte** de réutilisation. La sortie ne porte que des identifiants, des **titres**
+(convention CLI existante), des **clés de champ**, des ordinals, des compteurs et des
+dates. Un test vérifie qu'aucun jeton de 64 caractères hexadécimaux n'y figure.
+
+**Aucun verdict.** Pas de score global, pas de pourcentage, pas de classement. Chaque
+indicateur est une **liste de faits explicables**. Une ligne de pied dit que l'absence
+de signal n'est **pas** une preuve de sécurité : **L37**.
+
+**L'incertitude reste une incertitude.** `ExpiryState::Unknown` est rendu par son motif
+(« aucune date », « date mal formée », « date impossible », « plusieurs champs »),
+**jamais** par « valide ». `StrengthBand::Indeterminate` affiche « indéterminée (aucune
+estimation chiffrée) ». Le verdict haut de l'estimation s'appelle **« aucune faiblesse
+structurelle détectée »** — jamais « fort » ni « sûr ».
+
+**Défaut de présentation corrigé.** La première version répétait trois fois le même
+fait sur une estimation indéterminée ; la ligne ne l'énonce plus qu'une fois.
+
+**Limite.** Un rapport **vide** ne prouve rien : les six indicateurs sont bornés
+(L34, L35) et ne couvrent ni les fuites en ligne, ni les dictionnaires (**L37**).
+Aucun score global n'existe pour donner l'illusion du contraire.

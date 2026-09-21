@@ -66,3 +66,10 @@ path = "fuzz_targets/parse_attachment_blob.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "csv_import"
+path = "fuzz_targets/csv_import.rs"
+test = false
+doc = false
+bench = false

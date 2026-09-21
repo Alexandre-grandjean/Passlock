@@ -1165,3 +1165,73 @@ l'opération qu'il ne faut pas pouvoir déclencher par une faute de frappe. La p
 **documentée** (`docs/BACKUP.md` §4) et **rappelée** par `backup verify`, avec les deux
 chemins exacts. Le test de restauration, lui, est **effectif** : il rejoue la procédure
 documentée et relit une pièce jointe **octet pour octet**.
+
+---
+
+## ADR-036 — Import/export : un CSV canonique, sans identifiants internes
+
+**Statut :** accepté, **avec des limites nommées**
+
+**Problème.** Comment échanger les entrées d'un coffre avec l'extérieur sans introduire
+un format nouveau côté conteneur, et en garantissant que le même contenu produise
+**toujours le même fichier** ?
+
+**Décision.** Un **CSV canonique**, une ligne par entrée, en-tête fixe de 12 colonnes :
+`entry_ref, kind, title, subtitle, folder, tags, fields, favorite, archived, sensitive,
+created_at, updated_at`.
+
+**Aucun point d'insertion dans le format du coffre.** L'import/export est une couche de
+**traduction au-dessus de `Archive`** : le conteneur et l'archive ne changent pas d'un
+octet. Un CSV n'est donc **pas** un format de stockage — c'est un format d'échange.
+
+**Ce qui n'est pas exporté, et pourquoi.** Les **identifiants internes** (aléatoires,
+sans sens hors du coffre), l'**historique** (plusieurs versions par entrée : une
+projection « une ligne par entrée » n'en a pas), la **corbeille** (ce n'est pas une
+donnée active), les **réglages**, le **journal**, et les **pièces jointes** (les blobs
+chiffrés vivent hors du conteneur). Un export **n'est pas une sauvegarde** : c'est un
+échange de données.
+
+**Échappement déterministe et contextuel.** `%` → `%25` partout ; `/` → `%2F` **dans un
+composant de dossier seulement** ; `|` → `%7C` **dans un tag seulement**. Hexadécimal
+**toujours en majuscules** ; **NUL interdit**. Le **découpage précède le déséchappement**
+(`folder` sur `/`, `tags` sur `|`) : un séparateur littéral a été échappé à l'export, il
+ne peut donc pas être confondu avec une structure. Un `%XX` inconnu, incomplet ou
+minuscule **fait échouer l'import** : il n'existe **aucun** décodage « au mieux ».
+
+**La colonne `fields` est une structure canonique.** Un nombre variable de champs ne
+peut pas tenir « à plat » dans une cellule unique sans introduire un séparateur interne —
+ce que le contrat d'échappement interdit (`/` et `|` sont réservés). La cellule contient
+donc un **tableau JSON à clés fixes**, sans espace, dont les chaînes sont d'abord
+échappées (`%` → `%25`) puis encodées en JSON. `\u00XX` n'est admis **que** pour un C0
+sans raccourci ; `\u0000` est **interdit** ; les chiffres hexadécimaux sont **toujours en
+majuscules** ; les champs sont **ordonnés** par `(ordinal, clé, kind, valeur, concealed)`.
+**Une même valeur n'a donc qu'une seule écriture possible.**
+
+**Le déterminisme tient parce que le tri ignore les identifiants.** Les entrées sont
+triées par les **11 colonnes exportables**, comparées dans l'ordre des colonnes puis
+bytewise UTF-8 sur leur forme encodée. `entry_ref` est attribué **après** le tri
+(`E` + rang sur 8 chiffres), et **ignoré à l'import**. Ce qui n'est pas exporté n'entre
+dans aucune cellule et n'influence pas le comparateur : **`export → import → export` est
+identique octet pour octet**, quel que soit l'ordre d'insertion et quels que soient les
+identifiants.
+
+**L'import est transactionnel, et c'est une garantie de code.** Tout est analysé et
+validé **avant** la moindre mutation ; un **seul** `save()` a lieu à la fin. Un CSV
+refusé laisse le coffre **strictement inchangé** — ni entrée, ni dossier, ni tag. La
+validation métier est **réutilisée** (`Field::new`, `Entry::new`, `Entry::validate`,
+`add_folder`, `add_tag`, `add_entry`) : il n'existe pas de second système de validation.
+
+**Rejeter avant d'allouer.** La taille du fichier (512 Mio) est refusée **avant lecture** ;
+la taille d'un enregistrement et d'une cellule (64 Mio) **pendant** l'analyse ; le nombre
+d'entrées et de champs par entrée est aligné sur le modèle. Ces bornes dépassent ce que
+le modèle peut produire.
+
+**L'export est en clair, et sa destination est obligatoire.** Rien n'est écrit par défaut :
+`--output` (fichier **neuf**, en `0600`, **jamais écrasé**) ou `--stdout`. `export` ouvre
+le coffre en **lecture seule imposée** : aucun verrou, aucune sentinelle, aucune migration
+écrite. **L32** nomme la limite : un export est en clair et volontairement incomplet.
+
+**Aucune nouvelle dépendance.** Le parseur CSV/JSON est **écrit à la main** : le budget de
+dépendances du cœur interdit toute bibliothèque de (dé)sérialisation ou tout parseur
+générique. Un parseur borné et strict, fuzzé (`csv_import`), vaut mieux qu'une brique de
+plus à auditer.

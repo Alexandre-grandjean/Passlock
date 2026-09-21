@@ -34,7 +34,7 @@ Un seul document définit le contenu d'une phase : celui-ci. Les autres s'y réf
 | **1** | Moteur cryptographique et conteneur | **Terminée et gelée** |
 | **2** | Modèle de données et cœur de stockage | **Terminée et gelée** |
 | **3** | Générateur de secrets et TOTP | **Terminée et approuvée** |
-| **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **En cours** — étapes 1 à 3 sur 5 closes |
+| **4** | Pièces jointes, sauvegardes, récupération, import/export, presse-papiers | **En cours** — étapes 1 à 4 sur 5 closes |
 | **5** | Centre de sécurité et analyse d'URL | **Non commencée** |
 | **6** | Interface graphique | **Non commencée** |
 | **7** | Durcissement, audit et livrables de release | **Non commencée** |
@@ -277,7 +277,19 @@ le presse-papiers, ou vers un blob séparé.
   restauration **effectif** qui rejoue la procédure documentée et relit une pièce jointe
   **octet pour octet**. **Aucune atomicité de destination revendiquée** : une interruption
   brutale laisse une destination partielle, qui **échoue** au test.
-- **Restent : étapes 4 et 5** — import/export, presse-papiers.
+- **Étape 4 — import/export : close et auditée** (`docs/AUDIT_PHASE4_4_IMPORT_EXPORT.md`,
+  format dans `docs/IMPORT_EXPORT.md`). Livrés : un **format CSV canonique** — une ligne
+  par entrée, en-tête fixe de 12 colonnes —, **sans identifiants internes**, sans
+  pièces jointes, sans historique, sans corbeille ni réglages ; un échappement
+  **contextuel** strict (`%25` partout, `%2F` en dossier, `%7C` en tag, majuscules
+  seules, NUL interdit) ; une colonne `fields` en **structure canonique** (JSON à clés
+  fixes, champs ordonnés, une seule écriture par valeur). Le tri porte sur les 11
+  colonnes exportables, `entry_ref` étant attribué **après** tri : `export → import →
+  export` est **identique octet pour octet**, indépendamment des identifiants et de
+  l'ordre d'origine. L'**import** valide **tout** avant d'écrire, puis n'enregistre
+  qu'une fois — un CSV refusé ne laisse **aucune** modification. Commandes `export`
+  (`--output`/`--stdout`, jamais par défaut) et `import` (`--input`).
+- **Restent : étape 5** — presse-papiers.
 - C'est la **plus large** des phases restantes : cinq chantiers indépendants.
 
 ---

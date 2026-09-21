@@ -6,7 +6,7 @@
 
 ## Statut du projet
 
-**Phases 0 à 3 terminées et approuvées. Phase 4 en cours — étapes 1 à 3 sur 5 closes.**
+**Phases 0 à 3 terminées et approuvées. Phase 4 en cours — étapes 1 à 4 sur 5 closes.**
 
 Ce qui existe et est testé : dérivation de clés, chiffrement authentifié, hiérarchie
 de clés, conteneur et son format, écriture atomique, verrouillage, sentinelle
@@ -15,9 +15,9 @@ historique, corbeille, recherche, migration ; générateur de mots de passe, de 
 de passe et de secrets arbitraires ; HOTP et TOTP avec analyse des URI
 `otpauth://` ; interface en ligne de commande headless.
 
-Ce qui n'existe **pas encore** : import/export, presse-papiers *(phase 4, étapes 4 et 5)* ;
-centre de sécurité et analyse d'URL *(phase 5)* ; interface graphique *(phase 6)* ; audit
-externe, SBOM, build reproductible *(phase 7)*.
+Ce qui n'existe **pas encore** : presse-papiers *(phase 4, étape 5)* ; centre de sécurité
+et analyse d'URL *(phase 5)* ; interface graphique *(phase 6)* ; audit externe, SBOM,
+build reproductible *(phase 7)*.
 
 **Le contenu, l'ordre, les dépendances et l'état des phases font autorité dans
 [`ROADMAP.md`](ROADMAP.md).** Ce document-ci ne les redéfinit pas : il énonce les
@@ -183,6 +183,7 @@ un suivi explicite.
 | L26 | **Un fichier-clé est un fichier : il se copie.** Ce n'est donc pas un facteur de possession inviolable, contrairement à un jeton matériel qui ne peut pas être dupliqué | une copie du fichier clé ouvre le coffre depuis n'importe quelle machine, et rien ne permet de le détecter | dit à l'utilisateur à chaque installation, et repris dans `ROADMAP.md` §4 : le support doit être **physiquement distinct** du coffre et des sauvegardes, et présent seulement pendant l'ouverture. Un vrai facteur matériel (FIDO2 `hmac-secret`) est **repoussé et dit comme tel** — il exigerait `hidapi`/`libusb`, donc du C, et sortirait de la politique de dépendances (ADR-032) |
 | L30 | **Une sauvegarde n'est pas atomique.** Le couple (coffre, blobs) est fait de deux chemins indépendants, écrits en place — pas de temporaire + renommage | une interruption brutale peut laisser une destination **partielle**, qui **occupe le chemin** : une nouvelle tentative échoue, et le reliquat doit être supprimé explicitement | dit explicitement dans `docs/BACKUP.md` §2. Ce qui est **garanti** est la **détection** : une copie partielle **échoue** à `backup verify`. C'est ce qui distingue une sauvegarde d'un fichier quelconque |
 | L31 | **Le verrou de sauvegarde ne protège pas d'un accès hors de Passlock.** Un tiers peut lire le coffre pendant la copie | lecture concurrente par un processus non-Passlock | le conteneur reste chiffré ; le verrou protège la **cohérence de l'ensemble**, pas la confidentialité. Un lecteur Passlock n'est d'ailleurs **pas** bloqué, et c'est voulu |
+| L32 | **Un export CSV est en clair, et volontairement incomplet.** Il contient identifiants et secrets sans chiffrement, et n'embarque ni pièces jointes, ni historique, ni corbeille | le fichier exporté est lisible par quiconque y accède ; il ne permet pas de reconstruire un coffre à l'identique | dit à chaque export (avertissement), et documenté (`docs/IMPORT_EXPORT.md` §1 et §9). La destination est **obligatoire** (jamais de sortie par défaut), le fichier est créé en **exclusif** avec permissions `0600` et jamais écrasé. **Un export n'est pas une sauvegarde** — pour cela, `backup` |
 | L28 | **L'intégrité d'une pièce jointe est portée par son propre AEAD, et non par l'AAD du conteneur.** Un blob vit hors du fichier de coffre, donc hors de la portée de son tag | un blob supprimé par un tiers ne casse **aucun** tag : l'absence n'est constatée que par `attach verify`, qui la signale comme une incohérence | dit explicitement dans `docs/ATTACHMENT_FORMAT.md` §5.1. Une absence est une **erreur d'intégrité**, jamais un déchet : elle n'est pas candidate au ramasse-miettes. Un blob corrompu ou absent reste **référencé**, donc préservé |
 | L29 | **Une sauvegarde du seul fichier de coffre ne préserve pas les pièces jointes.** Les blobs vivent hors du conteneur | restaurer un coffre sans son répertoire `.attachments/` donne un coffre dont les pièces jointes sont **absentes** — incohérence détectée, jamais silencieuse | dit à chaque `attach add`. Le chantier « sauvegardes » (étape 3) doit inclure le répertoire des blobs ; la vérification de restauration doit rejouer le contrôle des blobs |
 | L27 | **La durabilité de l'entrée de répertoire n'est pas revendiquée sous Windows.** `make_durable` y retourne `FileOnly` : le contenu est synchronisé, pas le nom | après une coupure d'alimentation, une pièce jointe peut manquer alors que le coffre la référence — une **promesse non tenue** | le niveau est **rendu** par la primitive (`Durability`, `#[must_use]`) et **rapporté à l'ouverture** du coffre, jamais tu. L'absence est détectée par `attach verify` (étape 2). Reprise en phase 7 avec un exécuteur Windows réel |
@@ -384,6 +385,20 @@ exemplaire** des mêmes secrets.
 | **Second exemplaire** | une sauvegarde antérieure **survit** à un changement de mot de passe, à une révocation de slot et à une suppression d'entrée | les slots révoqués sont supprimés du **coffre**, pas des sauvegardes déjà écrites. C'est une propriété de toute sauvegarde, et elle est **dite** plutôt que découverte |
 | **Ancienneté** | une sauvegarde restaurée réactive la génération antérieure | **deux verdicts séparés** : l'intégrité décide du succès, l'ancienneté **informe**. Le retour en arrière se détecte par la sentinelle et se **légitime** par une restauration |
 | **Durabilité** | un support qui ne persiste pas l'entrée de répertoire ne rend pas la sauvegarde impossible | `make_durable` rend `FileOnly` sur Windows : la sauvegarde est produite et **avertie**, jamais bloquée. Le niveau annoncé est le **plus faible** des deux |
+
+### 4.11 Ce que la phase 4, étape 4, a ajouté comme surface
+
+De l'**échange de données en clair** : un fichier CSV lisible par n'importe quel outil.
+
+| Surface | Nature | Traitement |
+|---|---|---|
+| **Export en clair** | toutes les entrées, champs, dossiers et tags, sans chiffrement | destination **obligatoire** (`--output` ou `--stdout`), **jamais** par défaut (L32) ; fichier créé en **exclusif**, permissions `0600`, jamais écrasé ; avertissement affiché |
+| **Lecture seule de l'export** | `export` ouvre le coffre sans rien écrire | `read_only` **imposé** dans le code : aucun verrou, aucune sentinelle, aucune migration écrite, aucune permission réparée |
+| **Parseur CSV** | un analyseur de fichier fourni par l'utilisateur | borné **avant** allocation (taille de fichier, de ligne et de cellule), RFC 4180 strict, **NUL refusé**, UTF-8 exigé. Cible de fuzzing `csv_import` |
+| **Échappement** | un `%XX` mal interprété ferait passer une structure pour un contenu | échappement **contextuel** et **strict** : majuscules seules, seules les séquences admises dans le contexte, découpage **avant** déséchappement, aucun décodage « au mieux ». Un `%` littéral s'écrit **toujours** `%25` |
+| **Colonne `fields`** | structure textuelle à clés fixes | grammaire canonique stricte : clés dans l'ordre, espaces interdits, `\u` non canonique et `\u0000` refusés, **une seule écriture par valeur** (`docs/IMPORT_EXPORT.md` §4) |
+| **Import transactionnel** | une écriture de masse déclenchée par un fichier | **tout** est validé avant la moindre mutation, puis **un seul** `save()`. Un CSV refusé laisse le coffre **strictement inchangé** — ni entrée, ni dossier, ni tag |
+| **Coexistence** | un import s'ajoute aux données existantes | dossiers et tags de même nom **réutilisés**, identifiants internes **neufs** : l'import ne « restaure » pas un coffre, il y verse des entrées |
 
 ### 4.9 Ce que la phase 4, étape 2, a ajouté comme surface
 
@@ -641,7 +656,8 @@ principal** que chaque phase introduit, et où il est traité.
 | 1 | surface de traitement de fichiers non fiables avant authentification | §4.5, `docs/VAULT_FORMAT.md` |
 | 2 | historique conservant des secrets que l'utilisateur croit supprimés ; injection de requête *(écartée en abandonnant SQLite)* | §4.5, L22 |
 | 3 | faiblesse du générateur ; **revendication d'entropie trop généreuse** ; injection de séquences d'échappement par un libellé TOTP ; **le TOTP rangé dans le même coffre n'apporte aucune protection contre la compromission de ce coffre** ; horloge fausse indétectable | §4.6, §4.7, L16–L21, L23 |
-| 4 | **export en clair — fuite massive et délibérée** ; parseurs d'import à fuzzzer ; **presse-papiers comme canal public** ; ramasse-miettes de pièces jointes supprimant des fichiers | L22, T32, `docs/TOTP.md` §8 |
+| 4 | **presse-papiers comme canal public** ; ramasse-miettes de pièces jointes supprimant des fichiers | L22, T32, `docs/TOTP.md` §8 |
+| 4 *(étape 4, livrée)* | **un export est en clair** (L32) ; un parseur d'import mal borné pourrait être épuisé par un fichier hostile ; un échappement permissif ferait passer une structure pour un contenu | §4.11, L32, `docs/IMPORT_EXPORT.md`, `docs/AUDIT_PHASE4_4_IMPORT_EXPORT.md` |
 | 4 *(étape 3, livrée)* | **une sauvegarde antérieure survit à une révocation de slot** et à une suppression d'entrée ; **une destination partielle occupe le chemin** (L30) ; **le test de restauration ne doit rien écrire** ; un nettoyage qui se tromperait de cible détruirait des données **d'autrui** | §4.10, L30, L31, `docs/BACKUP.md`, `docs/AUDIT_PHASE4_3_SAUVEGARDES.md` |
 | 4 *(étape 2, livrée)* | **une sauvegarde du seul fichier de coffre perd les pièces jointes** (L29) ; **l'AEAD ne détecte pas une troncature propre** — c'est la métadonnée qui le fait (L28) ; un **ramasse-miettes** qui se tromperait de catégorie détruirait des données | §4.9, L28, L29, `docs/ATTACHMENT_FORMAT.md`, `docs/AUDIT_PHASE4_2_PIECES_JOINTES.md` |
 | 4 *(étape 1, livrée)* | **un slot supplémentaire est un chemin d'entrée de plus** — récupérabilité et résistance au vol varient en sens inverse ; **le fichier-clé n'est pas un facteur matériel** (L26) ; **la durabilité réduite sous Windows** peut laisser une promesse non tenue après coupure (L27) ; un secret affiché sur stdout est redirigeable | §4.8, §8, L26, L27, `docs/AUDIT_PHASE4_1_RECUPERATION.md` |

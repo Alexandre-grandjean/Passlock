@@ -7,17 +7,18 @@ mécanisme de récupération à distance, aucune télémétrie, aucune synchroni
 propriétaire — et ces absences sont des choix de conception, pas des
 fonctionnalités manquantes.
 
-> **Statut : phases 0 à 3 terminées et approuvées. Phase 4 en cours — étapes 1 à 3 sur 5 closes.**
+> **Statut : phases 0 à 3 terminées et approuvées. Phase 4 en cours — étapes 1 à 4 sur 5 closes.**
 >
 > Existent et sont testés : le moteur cryptographique et le format de coffre
 > (phase 1), le cœur de stockage — modèle de données, archive, migration, recherche,
 > historique, corbeille (phase 2), le générateur de secrets avec le TOTP (phase 3),
 > la **récupération** — clé de récupération et fichier-clé —, les **pièces jointes**
-> chiffrées et les **sauvegardes** avec test de restauration (phase 4, étapes 1 à 3 sur 5).
+> chiffrées, les **sauvegardes** avec test de restauration, et l'**import/export CSV**
+> canonique (phase 4, étapes 1 à 4 sur 5).
 >
-> N'existent **pas encore** : import/export et presse-papiers *(phase 4, étapes 4 et 5)* ;
-> centre de sécurité et analyse d'URL *(phase 5)* ; interface graphique *(phase 6)* ;
-> audit externe, SBOM et build reproductible *(phase 7)*.
+> N'existent **pas encore** : presse-papiers *(phase 4, étape 5)* ; centre de sécurité
+> et analyse d'URL *(phase 5)* ; interface graphique *(phase 6)* ; audit externe, SBOM
+> et build reproductible *(phase 7)*.
 >
 > Le contenu des phases fait autorité dans **[`ROADMAP.md`](ROADMAP.md)**.
 
@@ -52,6 +53,8 @@ fonctionnalités manquantes.
 * **Vérifier l'intégrité des pièces jointes** et supprimer les blobs devenus orphelins.
 * **Sauvegarder** un coffre et ses pièces jointes, et **tester la sauvegarde** — en
   déchiffrant réellement son contenu.
+* **Exporter** ses entrées en **CSV canonique** déterministe, et les **réimporter**
+  de façon transactionnelle — un import refusé ne laisse rien derrière lui.
 
 ## Ce que ce logiciel ne fait pas — et ne fera pas
 
@@ -255,6 +258,8 @@ techniquement ni juridiquement.
 | [`docs/AUDIT_PHASE4_2_PIECES_JOINTES.md`](docs/AUDIT_PHASE4_2_PIECES_JOINTES.md) | **Audit de la phase 4, étape 2** : domaines de clés, format de blob, ramasse-miettes, oracle faux trouvé par le fuzzing |
 | [`docs/BACKUP.md`](docs/BACKUP.md) | **Sauvegardes et restauration** : ce qu'est un couple de chemins, pourquoi aucune atomicité n'est revendiquée, la procédure de restauration |
 | [`docs/AUDIT_PHASE4_3_SAUVEGARDES.md`](docs/AUDIT_PHASE4_3_SAUVEGARDES.md) | **Audit de la phase 4, étape 3** : verrou de l'ensemble, nettoyage des créations, et une cible de fuzzing morte depuis la phase 2 |
+| [`docs/IMPORT_EXPORT.md`](docs/IMPORT_EXPORT.md) | **Format d'import/export CSV** reproductible : 12 colonnes, échappement contextuel, structure canonique de `fields`, bornes, déterminisme |
+| [`docs/AUDIT_PHASE4_4_IMPORT_EXPORT.md`](docs/AUDIT_PHASE4_4_IMPORT_EXPORT.md) | **Audit de la phase 4, étape 4** : déterminisme de l'export, échappement strict, import transactionnel, bornes avant allocation |
 | [`docs/AUDIT_PHASE3.md`](docs/AUDIT_PHASE3.md) | Audit adversarial du générateur et du TOTP : 35 vecteurs RFC, fuzzing, secret en mémoire, défauts trouvés |
 | [`docs/AUDIT_PHASE2_SEMANTIQUE.md`](docs/AUDIT_PHASE2_SEMANTIQUE.md) | **Audit sémantique** du magasin par modèle de référence : 9 500 opérations comparées, 18 invariants |
 | [`docs/AUDIT_PHASE2.md`](docs/AUDIT_PHASE2.md) | Audit adversarial du cœur de stockage |
@@ -265,7 +270,7 @@ techniquement ni juridiquement.
 Les affirmations de sécurité de ce projet sont vérifiables :
 
 ```sh
-cargo test --workspace          # 569 tests, dont 27 attaques adversariales et 9 500
+cargo test --workspace          # 601 tests, dont 27 attaques adversariales et 9 500
                                 # opérations comparées à un modèle de référence
 cargo deny check                # avis de sécurité, licences, bans, sources
 
@@ -317,9 +322,16 @@ passlock backup verify sauvegardes/2026-09-17.plk   # déchiffre CHAQUE pièce j
 #   cp    sauvegardes/2026-09-17.plk             coffre.plk
 #   cp -a sauvegardes/2026-09-17.plk.attachments coffre.plk.attachments
 
+# Exporter est reproductible : deux coffres de même contenu donnent le même fichier
+passlock export COFFRE --stdout > export.csv   # destination OBLIGATOIRE, en clair
+passlock export COFFRE --output export.csv     # fichier neuf en 0600, jamais écrasé
+# Un import valide TOUT avant d'écrire : un CSV refusé laisse le coffre inchangé
+passlock import COFFRE --input export.csv
+
 # Le fuzzing, cible par cible (nightly requis)
 cd fuzz && cargo +nightly fuzz run parse_recovery_key --  -max_total_time=60
 cd fuzz && cargo +nightly fuzz run parse_attachment_blob -- -max_total_time=60
+cd fuzz && cargo +nightly fuzz run csv_import -- -max_total_time=60
 ```
 
 ## État de vérification
@@ -335,6 +347,12 @@ trouvé, et ce qui reste **non vérifié**.
 * **Phase 2** — [`docs/AUDIT_PHASE2.md`](docs/AUDIT_PHASE2.md) et
   [`docs/AUDIT_PHASE2_SEMANTIQUE.md`](docs/AUDIT_PHASE2_SEMANTIQUE.md).
 * **Phase 3** — [`docs/AUDIT_PHASE3.md`](docs/AUDIT_PHASE3.md).
+* **Phase 4, étape 4 — import/export** —
+  [`docs/AUDIT_PHASE4_4_IMPORT_EXPORT.md`](docs/AUDIT_PHASE4_4_IMPORT_EXPORT.md) :
+  `export → import → export` **identique octet pour octet**, indépendamment des
+  identifiants internes et de l'ordre d'insertion ; échappement **contextuel** strict ;
+  import **transactionnel** (tout validé avant la moindre écriture). Voir le format dans
+  [`docs/IMPORT_EXPORT.md`](docs/IMPORT_EXPORT.md).
 * **Phase 4, étape 3 — sauvegardes** —
   [`docs/AUDIT_PHASE4_3_SAUVEGARDES.md`](docs/AUDIT_PHASE4_3_SAUVEGARDES.md) : deux défauts
   trouvés **hors du chemin nominal** — un nettoyage qui retirait un répertoire **d'autrui**,

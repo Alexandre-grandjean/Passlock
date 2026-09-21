@@ -28,6 +28,7 @@
 mod attachment;
 mod backup;
 mod generate;
+mod portability;
 mod recovery;
 mod totp;
 
@@ -235,6 +236,8 @@ fn run(hardening: passlock_platform::process::ProcessHardening) -> CliResult {
         Some(("history", sub)) => cmd_history(sub, &options, &config),
         Some(("attach", sub)) => attachment::cmd_attachment(sub, &options, &config),
         Some(("backup", sub)) => backup::cmd_backup(sub, &options, &config),
+        Some(("export", sub)) => portability::cmd_export(sub, &options, &config),
+        Some(("import", sub)) => portability::cmd_import(sub, &options, &config),
         Some(("recovery", sub)) => recovery::cmd_recovery(sub, &options, &config),
         Some(("keyfile", sub)) => recovery::cmd_keyfile(sub, &options, &config),
         Some(("generate", sub)) => generate::cmd_generate(sub),
@@ -626,6 +629,8 @@ fn build_command() -> Command {
         )
         .subcommand(attachment::command())
         .subcommand(backup::command())
+        .subcommand(portability::export_command())
+        .subcommand(portability::import_command())
         .subcommand(recovery::recovery_command())
         .subcommand(recovery::keyfile_command())
         .subcommand(generate::generate_command())

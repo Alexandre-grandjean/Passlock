@@ -574,7 +574,7 @@ donc explicite et fait partie de la définition de la phase.
 
 | Élément | Contenu |
 |---|---|
-| **Durcissement final** | reprise de toutes les limites encore ouvertes : **L9/L12** (`SECURITY.md`), **NV5**, les chemins Windows, les paramètres de durcissement partiels |
+| **Durcissement final** | reprise de toutes les limites encore ouvertes : **L9/L12** (`SECURITY.md`), **les sanitizers (ASan/TSan) et Miri non relancés** depuis les phases 2–3, les chemins Windows, les paramètres de durcissement partiels. **L7 et L13** attendent une **décision** (`SECURITY.md` §4) |
 | **Audit interne** | campagne adversariale complète sur l'ensemble du produit, sur le modèle des audits de phases 1 et 2 : fonctionnalités livrées / tests réellement exécutés / défauts trouvés / défauts corrigés / limites non vérifiées / risques résiduels |
 | **SBOM** | nomenclature logicielle complète, exhaustive et versionnée, générée depuis le `Cargo.lock` |
 | **Build reproductible** | installation des conditions d'une construction reproductible et **mesure** de la reproductibilité atteinte |
@@ -616,7 +616,9 @@ vide ni un tiret.
 
 **Dépendances**
 
-- Phases 1 à 6 — durcir suppose que tout existe.
+- Phases 1 à 5 — durcir suppose que tout ce qui est **livré** existe. La phase 6
+  (interface graphique) est **abandonnée** (gates E.1/E.2) : elle n'entre pas dans les
+  dépendances.
 
 **État**
 
@@ -632,7 +634,7 @@ vide ni un tiret.
 - **L'ordre est une contrainte, pas une préférence.** Les phases 4 à 7 dépendent des
   précédentes ; les intervertir ferait porter à une phase des responsabilités qu'une
   autre n'a pas encore posées.
-- **Les phases 5, 6 et 7 ne sont pas détaillées au même niveau que 1 à 4.** Celles-ci
-  ont été spécifiées puis réalisées ; celles-là seront précisées au moment de les
-  aborder, à partir de cette définition, et cette définition ne changera pas sans que
-  ce document soit modifié.
+- **La phase 7 n'est pas détaillée au même niveau que 1 à 4.** Celles-ci ont été
+  spécifiées puis réalisées ; celle-là sera précisée au moment de l'aborder, à partir de
+  cette définition, et cette définition ne changera pas sans que ce document soit modifié.
+  (La phase 5 est livrée et gelée ; la phase 6 est **abandonnée**.)

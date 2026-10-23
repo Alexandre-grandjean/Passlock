@@ -149,16 +149,20 @@ jobs:
         run: cargo +nightly fuzz build
         working-directory: fuzz
 
+      # Les trois cibles « cœur » (conteneur, header, payload) portent la surface
+      # non fiable **avant authentification** : elles reçoivent une fenêtre plus
+      # longue (300 s) que le reste. C'est une garde de **non-régression**, pas une
+      # preuve — une campagne finie ne ramène pas la probabilité d'un défaut à zéro.
       - name: Fuzzer l'analyse du conteneur
-        run: cargo +nightly fuzz run vault_parse -- -max_total_time=120 -rss_limit_mb=2048
+        run: cargo +nightly fuzz run vault_parse -- -max_total_time=300 -rss_limit_mb=2048
         working-directory: fuzz
 
       - name: Fuzzer le décodage du header
-        run: cargo +nightly fuzz run header_decode -- -max_total_time=120 -rss_limit_mb=2048
+        run: cargo +nightly fuzz run header_decode -- -max_total_time=300 -rss_limit_mb=2048
         working-directory: fuzz
 
       - name: Fuzzer le décodage de l'enveloppe
-        run: cargo +nightly fuzz run payload_decode -- -max_total_time=120 -rss_limit_mb=2048
+        run: cargo +nightly fuzz run payload_decode -- -max_total_time=300 -rss_limit_mb=2048
         working-directory: fuzz
 
       # NOTE DE CORRECTION. Ce job ne lançait que **trois** des cinq cibles déclarées :

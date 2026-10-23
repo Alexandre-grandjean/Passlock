@@ -287,7 +287,7 @@ techniquement ni juridiquement.
 Les affirmations de sécurité de ce projet sont vérifiables :
 
 ```sh
-cargo test --workspace          # 601 tests, dont 27 attaques adversariales et 9 500
+cargo test --workspace          # 729 tests, dont 27 attaques adversariales et 9 500
                                 # opérations comparées à un modèle de référence
 cargo deny check                # avis de sécurité, licences, bans, sources
 
